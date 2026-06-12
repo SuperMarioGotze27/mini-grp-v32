@@ -1,0 +1,15 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.pyc
+.venv
+venv
+cache
+output
+backtest_output
+research_data
+*.db
+*.docx
+.env*
+.streamlit/secrets.toml

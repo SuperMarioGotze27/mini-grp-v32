@@ -1,171 +1,116 @@
-# Mini-GRP v3.3
+# Mini-GRP v3.4
 
-An auditable multi-factor stock screening and walk-forward research framework inspired by publicly described ideas behind Principal's Global Research Platform (GRP).
+Mini-GRP is an auditable multi-factor stock research system inspired by publicly described ideas behind Principal's Global Research Platform. It turns an equity universe into an explainable shortlist, stores point-in-time monthly snapshots, validates a bounded machine-learning overlay, and exposes the result through Streamlit.
 
-Mini-GRP is a research and interview project, not an automated trading product. It turns a broad stock universe into an explainable shortlist, while keeping synthetic demonstrations visibly separated from genuine market data.
+This is a research and interview project, not an automated trading product or investment recommendation.
 
-## What Changed in v3.3
+## v3.4 at a glance
 
-- Restored the complete modular codebase to GitHub instead of publishing only deployment stubs.
-- Fixed the broken `app.py` entry point and removed duplicated scoring/backtest logic.
-- Added explicit `demo` and `research` data modes. Research mode refuses synthetic fallback.
-- Added provenance fields: `data_source`, `is_mock`, `as_of_date`, `factor_coverage`, and `expectation_source`.
-- Standardized factors within each market before cross-market ranking.
-- Excluded missing or constant factors and dynamically re-normalized active dimension weights.
-- Rebuilt the walk-forward engine with deterministic dates, turnover-based costs, equal-weight benchmark, frequency-aware annualization, IC/ICIR, and hard failure gates.
-- Added reproducible CSV/JSON artifacts, automated tests, GitHub Actions CI, Docker support, and a verified Streamlit interface.
+- Live A-share screening through Tushare, including compatible proxy endpoints.
+- Eleven currently obtainable A-share factors across Value, Quality, Growth, and Momentum.
+- SQL-backed monthly point-in-time snapshots with 20-trading-day forward labels.
+- Expanding-window validation of Ridge and Gradient Boosting candidates.
+- Model registry with explicit `candidate` and `approved` states.
+- Approved ML overlay capped at 30% of the final score; the linear model remains the anchor.
+- Real stored-snapshot baseline backtest with turnover costs and an equal-weight benchmark.
+- Streamlit pages for screening, model monitoring, research backtesting, and methodology.
+- Google Cloud Run service + Cloud Run Job + Cloud SQL deployment pattern.
 
-## Research Workflow
+## Architecture
 
 ```text
-Market data / synthetic demo
-        |
-        v
-Provenance and schema validation
-        |
-        v
-Winsorization -> market-local z-score -> factor direction
-        |
-        v
-Value / Quality / Growth / Momentum / Expectation
-        |
-        v
-Dynamic weighted score -> percentile rank -> industry rank
-        |
-        +--------------------+
-        |                    |
-        v                    v
-Top-N screening       Walk-forward evaluation
+Tushare live API
+      |
+      +--> Live cross-section --> factor engine --> linear score --------+
+      |                                                                |
+      +--> Month-end collector --> SQL snapshots --> walk-forward ML ---+--> bounded final score
+                                         |                              |
+                                         +--> real snapshot backtest    +--> Streamlit / CSV
+
+Cloud Run service: Streamlit UI and inference
+Cloud Run job: incremental collection and model training
+Cloud SQL: snapshots and model registry
+Secret Manager: provider token and database URL
 ```
 
-## Factor Model
+## Factor model
 
-| Dimension | Weight | Factors |
+| Dimension | Policy weight | Live historical factors |
 |---|---:|---|
-| Value | 25% | PE, PB, PS, EV/EBITDA, dividend yield |
-| Quality | 25% | ROE, ROA, gross margin, net margin, debt/equity |
-| Growth | 15% | revenue growth, profit growth, FCF yield |
+| Value | 25% | PE TTM, PB LF, PS TTM, dividend yield |
+| Quality | 25% | gross margin, net margin |
+| Growth | 15% | revenue YoY, profit YoY |
 | Momentum | 15% | 1-month, 3-month, 12-month return |
-| Expectation | 20% | SUE, EPS revision, rating revision |
+| Expectation | 20% | reserved for licensed analyst-estimate data |
 
-If a dimension has no usable provider data, it is excluded and the remaining weights are normalized. Real-data adapters no longer fabricate expectation factors.
+Unavailable dimensions are excluded and active weights are normalized. Research mode never fabricates missing expectation data.
 
-## Quick Start
+## Quick start
 
-Python 3.10+ is recommended.
-
-```bash
-pip install -r requirements.txt
-```
-
-Run the Streamlit application:
-
-```bash
+```powershell
+pip install -r requirements-dev.txt
+pytest
 streamlit run streamlit_app.py
 ```
 
-Run deterministic demo screening:
+Configure real data without committing secrets:
 
-```bash
-python -m core.main --mode screen --data-mode demo --max-stocks 200 --top-n 20
+```powershell
+$env:TUSHARE_TOKEN="your-token"
+$env:TUSHARE_API_URL="https://ts.gyzcloud.top/api"
 ```
 
-Run the synthetic walk-forward pipeline check:
+Build monthly history and train the governed overlay:
 
-```bash
-python -m core.main --mode backtest --data-mode demo --start-date 2022-01-01 --end-date 2024-12-31
+```powershell
+python -m research.cli collect --months 60 --max-stocks 1500
+python -m research.cli train --overlay-weight 0.15
+python -m research.cli status
+python -m research.cli backtest --top-n 20 --transaction-cost 0.001
 ```
 
-## Research Data Mode
+The collector is incremental: completed history is skipped, while the latest two month-ends are refreshed so forward labels can mature.
 
-Install optional provider adapters:
+## Model governance
 
-```bash
-pip install -r requirements-research.txt
-```
+The ML target is each stock's cross-sectional percentile rank of its future 20-trading-day return. Validation uses earlier dates for training and a later month for testing. A model is registered as `approved` only when:
 
-Configure one or more credentials:
+- at least three out-of-sample folds are available;
+- mean out-of-sample rank IC is positive;
+- mean top-minus-bottom future return spread is positive.
 
-```bash
-set TUSHARE_TOKEN=your_token
-set TUSHARE_API_URL=https://ts.gyzcloud.top/api
-set ALPHA_VANTAGE_API_KEY=your_key
-```
+If no approved model exists, the application refuses ML mode and retains the interpretable linear baseline.
 
-For Streamlit Community Cloud, add the same names under **App settings → Secrets**:
+## Google Cloud Run
 
-```toml
-TUSHARE_TOKEN = "your_rotated_token"
-TUSHARE_API_URL = "https://ts.gyzcloud.top/api"
-```
+See [DEPLOY.md](DEPLOY.md) and [deploy/gcp/README.md](deploy/gcp/README.md). The repository includes a PowerShell deployment script that builds one image and deploys it as both a Cloud Run service and a Cloud Run Job.
 
-The sidebar connection test verifies the token and endpoint without displaying or storing the token. Research screening uses the latest published `daily_basic` date, even when the current trading day is still in progress.
-
-Then run, for example:
-
-```bash
-python -m core.main --mode screen --data-mode research --market cn --max-stocks 100
-```
-
-Research mode raises a clear error when genuine data cannot be obtained. It never substitutes demo data.
-
-## Outputs
-
-Screening writes:
-
-- `screening_universe.csv`
-- `top_picks.csv`
-- `screening_manifest.json`
-
-Backtesting writes:
-
-- `periods.csv`
-- `equity.csv`
-- `holdings.csv`
-- `metrics.json`
-- `run_manifest.json`
-- `equity_curve.png`
-
-Each backtest period must contain selected holdings, valid returns, and finite NAV values. Invalid runs fail instead of returning zero-filled performance.
-
-## Validation
-
-```bash
-pip install -r requirements-dev.txt
-python -m compileall -q .
-pytest
-```
-
-The CI workflow repeats compilation, tests, demo screening, and demo backtesting on every push and pull request.
-
-## Project Structure
+## Project structure
 
 ```text
-core/              factor processing, scoring, CLI orchestration
-data/              provider adapters, unified schema, local cache
-backtest/          walk-forward engine and performance artifacts
-analytics/         experimental analysis utilities
-ml/                optional ML overlays and validators
-viz/               legacy static reporting utilities
-utils/              deterministic synthetic data
-tests/              regression and integration tests
-docs/               project reports and deployment guidance
-streamlit_app.py    canonical web application
-app.py              compatibility wrapper
+core/          factor processing and linear scoring
+data/          Tushare and other provider adapters
+research/      snapshot storage, collection, training, inference, real backtest
+backtest/      deterministic synthetic pipeline checks
+ml/            advanced optional research components
+tests/         regression and research-pipeline tests
+deploy/gcp/    Cloud Run deployment assets
+docs/          project reports
+streamlit_app.py
 ```
 
-## Current Boundaries
+## Research boundaries
 
-- The bundled backtest demo uses synthetic point-in-time data and is not evidence of an investable strategy.
-- A production research backtest still requires licensed historical point-in-time fundamentals, survivorship-bias-free constituents, corporate-action-adjusted prices, and release-date-aware analyst expectations.
-- Provider field coverage varies. `factor_coverage` and `expectation_source` should be reviewed before interpreting rankings.
-- Optional ML modules remain experimental and are deliberately outside the default scoring path.
+- Tushare `bak_basic` is a practical historical source, but it is not a substitute for a licensed, filing-release-aware point-in-time fundamentals database.
+- The stored-snapshot backtest starts when the collector is first run; retroactively requested provider fields may contain revision or survivorship risk.
+- Analyst expectation factors remain unavailable without a licensed source.
+- The system produces research rankings, not orders. Portfolio construction, risk limits, liquidity, compliance, and execution remain outside the scope.
 
 ## Documentation
 
-- [Complete project report](docs/Mini-GRP-v33-Complete-Project-Report.md)
+- [Complete v3.4 project report](docs/Mini-GRP-v34-Complete-Project-Report.md)
 - [Deployment guide](DEPLOY.md)
 
 ## Disclaimer
 
-For research, education, and interview demonstration only. Nothing in this repository constitutes investment advice or a representation of historical or future performance.
+For research, education, and interview demonstration only. Historical analysis does not represent live investment performance.

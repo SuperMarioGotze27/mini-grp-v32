@@ -1,4 +1,4 @@
-"""Streamlit application for Mini-GRP v3.3."""
+"""Streamlit application for Mini-GRP v3.4."""
 
 from __future__ import annotations
 
@@ -16,6 +16,9 @@ from backtest.engine import BacktestConfig, analyze_backtest_results, run_backte
 from core.main import score_universe
 from data.unified_fetcher import DataSourceUnavailable, fetch_a_share_data, fetch_us_data
 from data.tushare_client import TushareClientError, probe_tushare_connection
+from research.backtest import run_snapshot_backtest
+from research.inference import apply_ml_overlay
+from research.storage import ResearchStore
 from utils.mock import generate_mock_data
 
 
@@ -114,6 +117,11 @@ def _configure_research_api() -> str:
     return hashlib.sha256(signature_value.encode("utf-8")).hexdigest()[:12]
 
 
+def _database_url() -> str | None:
+    value = os.environ.get("DATABASE_URL", "").strip() or _secret_value("DATABASE_URL")
+    return value or None
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_universe(
     data_mode: str,
@@ -155,6 +163,8 @@ def _screening_tab(
     top_n: int,
     seed: int,
     provider_signature: str,
+    scoring_mode: str,
+    database_url: str | None,
 ) -> None:
     left, right = st.columns([1.4, 1])
     with left:
@@ -165,10 +175,28 @@ def _screening_tab(
 
     if run:
         try:
+            model = None
+            if scoring_mode == "Approved ML overlay":
+                store = ResearchStore(database_url)
+                model = store.latest_model("approved")
+                if model is None:
+                    st.error(
+                        "ML overlay is unavailable because no model has passed the approval thresholds. "
+                        "The previous linear result remains unchanged."
+                    )
+                    st.caption("Open Model registry to review the candidate validation metrics.")
+                    return
             with st.spinner("Loading and scoring the universe..."):
                 universe = _load_universe(data_mode, market, n_stocks, seed, provider_signature)
-                scored, top_picks = score_universe(universe, top_n)
-                st.session_state["screening"] = (scored, top_picks)
+                scored, baseline_top = score_universe(universe, top_n)
+                model_version = "linear-v3.4"
+                if scoring_mode == "Approved ML overlay":
+                    scored = apply_ml_overlay(scored, model_record=model)
+                    top_picks = scored.head(top_n).copy()
+                    model_version = str(top_picks["model_version"].iloc[0])
+                else:
+                    top_picks = baseline_top
+                st.session_state["screening"] = (scored, top_picks, scoring_mode, model_version)
         except DataSourceUnavailable as exc:
             st.error(str(exc))
         except Exception as exc:
@@ -178,14 +206,18 @@ def _screening_tab(
         st.info("Run the model to generate the ranked universe.")
         return
 
-    scored, top_picks = st.session_state["screening"]
+    scored, top_picks, applied_mode, model_version = st.session_state["screening"]
     source = str(scored.get("data_source", pd.Series(["unknown"])).iloc[0])
     coverage = float(scored.get("factor_coverage", pd.Series([1.0])).mean())
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Universe", f"{len(scored):,}")
     c2.metric("Selected", len(top_picks))
     c3.metric("Data source", source)
     c4.metric("Mean factor coverage", f"{coverage:.0%}")
+    c5.metric("Scoring model", "ML overlay" if applied_mode == "Approved ML overlay" else "Linear")
+
+    if applied_mode == "Approved ML overlay":
+        st.caption(f"Approved model: {model_version}. ML contribution is capped at 30% of the final score.")
 
     st.dataframe(top_picks, use_container_width=True, hide_index=True)
     st.download_button(
@@ -206,11 +238,50 @@ def _screening_tab(
         st.plotly_chart(fig, use_container_width=True)
 
 
-def _backtest_tab(top_n: int, seed: int) -> None:
-    st.subheader("Walk-forward pipeline check")
+def _backtest_tab(top_n: int, seed: int, database_url: str | None) -> None:
+    st.subheader("Point-in-time backtest")
+    dataset = st.radio(
+        "Dataset",
+        ["Stored research snapshots", "Synthetic pipeline check"],
+        horizontal=True,
+    )
+    if dataset == "Stored research snapshots":
+        st.info(
+            "Uses factors stored at each month-end and the following 20-trading-day return. "
+            "The current research backtest covers the interpretable linear baseline; ML evidence is shown in Model registry."
+        )
+        cost_pct = st.slider("One-way transaction cost (%)", 0.0, 0.5, 0.1, 0.05, key="research_cost")
+        if st.button("Run research backtest", use_container_width=True):
+            try:
+                with st.spinner("Scoring stored month-end snapshots..."):
+                    results, metrics = run_snapshot_backtest(
+                        ResearchStore(database_url),
+                        top_n=top_n,
+                        transaction_cost=cost_pct / 100.0,
+                    )
+                    st.session_state["research_backtest"] = (results, metrics)
+            except Exception as exc:
+                st.error(str(exc))
+        if "research_backtest" not in st.session_state:
+            return
+        results, metrics = st.session_state["research_backtest"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Annualized return", f"{metrics['annualized_return']:.2%}")
+        c2.metric("Annualized excess", f"{metrics['annualized_excess']:.2%}")
+        c3.metric("Max drawdown", f"{metrics['max_drawdown']:.2%}")
+        c4.metric("Average turnover", f"{metrics['average_turnover']:.1%}")
+        curve = results[["snapshot_date", "portfolio_nav", "benchmark_nav"]].copy()
+        curve["snapshot_date"] = pd.to_datetime(curve["snapshot_date"])
+        curve = curve.melt("snapshot_date", var_name="Series", value_name="NAV")
+        st.plotly_chart(
+            px.line(curve, x="snapshot_date", y="NAV", color="Series", title="Stored-snapshot equity curve"),
+            use_container_width=True,
+        )
+        st.dataframe(results.drop(columns=["selected_codes"], errors="ignore"), use_container_width=True, hide_index=True)
+        return
+
     st.warning(
-        "This page uses deterministic synthetic point-in-time data. It validates the pipeline and accounting, "
-        "but it is not investment evidence."
+        "This deterministic synthetic dataset validates the pipeline and accounting only; it is not investment evidence."
     )
     c1, c2, c3 = st.columns(3)
     start = c1.date_input("Start", date(2022, 1, 1))
@@ -251,12 +322,62 @@ def _backtest_tab(top_n: int, seed: int) -> None:
     st.dataframe(results.drop(columns=["selected_stocks"], errors="ignore"), use_container_width=True, hide_index=True)
 
 
+def _model_registry_tab(database_url: str | None) -> None:
+    st.subheader("Research data and model registry")
+    try:
+        store = ResearchStore(database_url)
+        status = store.status()
+        model = store.latest_model("approved")
+        candidate = store.latest_model("candidate")
+    except Exception as exc:
+        st.error(f"Research database unavailable: {exc}")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Snapshot dates", status["snapshot_dates"])
+    c2.metric("Snapshot rows", f"{status['snapshot_rows']:,}")
+    c3.metric("Models trained", status["model_count"])
+    c4.metric("Latest snapshot", status["snapshot_end"] or "None")
+
+    if model is None:
+        st.warning("No approved model is available. Screening remains on the linear baseline.")
+        if candidate is not None:
+            st.caption(f"Latest candidate {candidate.version} did not pass the approval thresholds.")
+        return
+
+    metrics = model.metrics
+    selected = metrics.get("validation", {}).get(metrics.get("selected_model", ""), {})
+    st.success(
+        f"Approved: {model.version} | {model.trained_from} to {model.trained_through} | "
+        f"{metrics.get('training_rows', 0):,} training rows"
+    )
+    m1, m2, m3 = st.columns(3)
+    mean_ic = selected.get("mean_rank_ic")
+    spread = selected.get("mean_top_bottom_spread")
+    m1.metric("Walk-forward rank IC", "N/A" if mean_ic is None else f"{mean_ic:.3f}")
+    m2.metric("Top-bottom forward spread", "N/A" if spread is None else f"{spread:.2%}")
+    m3.metric("Selected algorithm", metrics.get("selected_model", "unknown"))
+
+    folds = pd.DataFrame(selected.get("folds", []))
+    if not folds.empty:
+        folds["date"] = pd.to_datetime(folds["date"])
+        st.plotly_chart(
+            px.bar(folds, x="date", y="rank_ic", title="Out-of-sample rank IC by validation month"),
+            use_container_width=True,
+        )
+        st.dataframe(folds, use_container_width=True, hide_index=True)
+
+    with st.expander("Model features and factor diagnostics"):
+        st.write(", ".join(model.features))
+        st.dataframe(pd.DataFrame(metrics.get("factor_metrics", [])), use_container_width=True, hide_index=True)
+
+
 def main() -> None:
-    st.set_page_config(page_title="Mini-GRP v3.3", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Mini-GRP v3.4", layout="wide", initial_sidebar_state="expanded")
     _style()
     st.markdown(
-        "<div class='hero'><h1>Mini-GRP v3.3</h1>"
-        "<p>Auditable multi-factor stock screening and walk-forward research framework.</p></div>",
+        "<div class='hero'><h1>Mini-GRP v3.4</h1>"
+        "<p>Point-in-time factor research, governed machine learning, and production screening.</p></div>",
         unsafe_allow_html=True,
     )
 
@@ -265,20 +386,35 @@ def main() -> None:
     market = st.sidebar.selectbox("Market", ["CN", "US"], disabled=data_mode == "Synthetic demo")
     n_stocks = st.sidebar.slider("Universe size", 50, 500, 200, 50)
     top_n = st.sidebar.slider("Top N", 5, 50, 20, 5)
+    scoring_mode = st.sidebar.selectbox("Scoring model", ["Linear baseline", "Approved ML overlay"])
     seed = st.sidebar.number_input("Demo seed", min_value=1, max_value=999999, value=42)
 
     provider_signature = _configure_research_api()
+    database_url = _database_url()
 
     css_class = "mode-demo" if data_mode == "Synthetic demo" else "mode-research"
     st.markdown(
         f"<span class='{css_class}'>{data_mode}</span>",
         unsafe_allow_html=True,
     )
-    screen_tab, backtest_tab, method_tab = st.tabs(["Screening", "Backtest", "Methodology"])
+    screen_tab, model_tab, backtest_tab, method_tab = st.tabs(
+        ["Screening", "Model registry", "Backtest", "Methodology"]
+    )
     with screen_tab:
-        _screening_tab(data_mode, market, n_stocks, top_n, int(seed), provider_signature)
+        _screening_tab(
+            data_mode,
+            market,
+            n_stocks,
+            top_n,
+            int(seed),
+            provider_signature,
+            scoring_mode,
+            database_url,
+        )
+    with model_tab:
+        _model_registry_tab(database_url)
     with backtest_tab:
-        _backtest_tab(top_n, int(seed))
+        _backtest_tab(top_n, int(seed), database_url)
     with method_tab:
         st.subheader("Research process")
         st.markdown(
@@ -287,8 +423,11 @@ def main() -> None:
             2. Validate factor availability; unusable or constant factors are excluded.
             3. Winsorize and standardize factors within each market, then apply directionality.
             4. Build Value, Quality, Growth, Momentum, and Expectation dimension scores.
-            5. Combine active dimensions with normalized weights and rank within industry.
-            6. For backtests, rebalance only on explicit dates, charge turnover-based costs, and compare with an equal-weight universe benchmark.
+            5. Store month-end point-in-time snapshots and calculate the following 20-trading-day label.
+            6. Validate Ridge and Gradient Boosting with expanding-window, out-of-sample folds.
+            7. Register a model only when rank IC and top-minus-bottom spread are both positive.
+            8. Blend an approved ML score into the linear baseline with a hard 30% maximum weight.
+            9. Backtest stored snapshots with explicit turnover costs and an equal-weight universe benchmark.
 
             The synthetic mode is for demonstrations and regression tests. Research mode refuses silent fallback to synthetic data.
             """

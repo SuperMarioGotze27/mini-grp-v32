@@ -10,4 +10,11 @@ venv/
 cache/
 output/
 backtest_output/
+research_data/
+*.db
+*.sqlite
+*.sqlite3
+.env.*
+!.env.example
 ~$*.docx
+.codex-report-render/
