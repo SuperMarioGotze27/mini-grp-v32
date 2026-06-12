@@ -663,7 +663,7 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
                 )
 
     # 2. 尝试 Tushare Pro
-        if use_tushare:
+    if use_tushare:
         try:
             import tushare as ts
             token = os.environ.get("TUSHARE_TOKEN", "")
