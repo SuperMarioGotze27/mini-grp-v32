@@ -16,6 +16,6 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: python -m compileall -q .
       - run: pytest
-      - run: python -m research.cli --database-url sqlite:///:memory: status
+      - run: "python -m research.cli --database-url sqlite:///:memory: status"
       - run: python -m core.main --mode screen --data-mode demo --max-stocks 60 --top-n 10 --output-dir output/ci
       - run: python -m core.main --mode backtest --data-mode demo --start-date 2023-01-01 --end-date 2024-12-31 --max-stocks 60 --top-n 10 --output-dir output/ci
