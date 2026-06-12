@@ -29,6 +29,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from data.tushare_client import TushareClientError, create_tushare_client, recent_open_trade_dates
+
 # ---------------------------------------------------------------------------
 # 日志配置
 # ---------------------------------------------------------------------------
@@ -109,8 +111,10 @@ A_SHARE_FIELD_MAP: Dict[str, str] = {
     "pe": "pe_ttm",
     "pb": "pb_lf",
     "ps": "ps_ttm",
+    "dv_ttm": "dividend_yield",
     "ev_ebitda": "ev_ebitda",
     "roe": "roe_deducted",
+    "roe_dt": "roe_deducted",
     "roa": "roa",
     "grossprofit_margin": "gross_margin",
     "netprofit_margin": "net_margin",
@@ -120,6 +124,8 @@ A_SHARE_FIELD_MAP: Dict[str, str] = {
     "profit_yoy": "profit_yoy",
     "q_sales_yoy": "revenue_yoy",
     "q_profit_yoy": "profit_yoy",
+    "gpr": "gross_margin",
+    "npr": "net_margin",
 }
 
 # 美股数据源字段映射（原始 -> 统一）
@@ -523,10 +529,86 @@ def _map_columns(df: pd.DataFrame, field_map: Dict[str, str]) -> pd.DataFrame:
     """
     if df.empty:
         return df
+    original_columns = list(df.columns)
     rename_map = {k: v for k, v in field_map.items() if k in df.columns}
     if rename_map:
         df = df.rename(columns=rename_map)
-    return df
+    if not df.columns.duplicated().any():
+        return df
+
+    # Providers can return aliases such as pe and pe_ttm together. Mapping
+    # both to the canonical name must not leave duplicate DataFrame labels.
+    columns: Dict[str, pd.Series] = {}
+    for name in dict.fromkeys(df.columns):
+        positions = [index for index, column in enumerate(df.columns) if column == name]
+        positions.sort(key=lambda index: original_columns[index] != name)
+        matches = df.iloc[:, positions]
+        columns[name] = matches.iloc[:, 0] if matches.shape[1] == 1 else matches.bfill(axis=1).iloc[:, 0]
+    return pd.DataFrame(columns, index=df.index)
+
+
+def _fetch_tushare_financials(pro: Any, ts_codes: List[str]) -> pd.DataFrame:
+    """Fetch latest financial indicators for a small explicitly requested list."""
+    if not ts_codes or len(ts_codes) > 20:
+        return pd.DataFrame()
+
+    start_date = (datetime.now() - timedelta(days=550)).strftime("%Y%m%d")
+    end_date = datetime.now().strftime("%Y%m%d")
+    fields = (
+        "ts_code,ann_date,end_date,roe_dt,roa,grossprofit_margin,"
+        "netprofit_margin,debt_to_assets,q_sales_yoy,q_profit_yoy"
+    )
+    records = []
+    for ts_code in ts_codes:
+        try:
+            frame = pro.fina_indicator(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                fields=fields,
+            )
+        except Exception as exc:
+            logger.warning("Tushare financial indicators unavailable for %s: %s", ts_code, exc)
+            continue
+        if frame is None or frame.empty:
+            continue
+        records.append(frame.sort_values(["ann_date", "end_date"], ascending=False).head(1))
+    if not records:
+        return pd.DataFrame()
+    return _map_columns(pd.concat(records, ignore_index=True), A_SHARE_FIELD_MAP)
+
+
+def _fetch_tushare_momentum(pro: Any, latest_daily: pd.DataFrame, trade_date: str) -> pd.DataFrame:
+    """Build 1/3/12-month returns with three cross-sectional daily requests."""
+    if latest_daily is None or latest_daily.empty or "close" not in latest_daily.columns:
+        return pd.DataFrame()
+
+    latest_date = datetime.strptime(trade_date, "%Y%m%d").date()
+    open_dates = recent_open_trade_dates(pro, as_of=latest_date, lookback_days=400)
+    result = latest_daily[["code", "close"]].copy().rename(columns={"close": "close_latest"})
+    horizons = {"1m": 31, "3m": 93, "12m": 366}
+
+    for label, days in horizons.items():
+        target = (latest_date - timedelta(days=days)).strftime("%Y%m%d")
+        past_date = next((value for value in open_dates if value <= target), None)
+        if not past_date:
+            continue
+        try:
+            past = pro.daily(trade_date=past_date, fields="ts_code,trade_date,close")
+        except Exception as exc:
+            logger.warning("Tushare daily history unavailable for %s: %s", past_date, exc)
+            continue
+        if past is None or past.empty:
+            continue
+        past = _map_columns(past, A_SHARE_FIELD_MAP)[["code", "close"]]
+        result = result.merge(past.rename(columns={"close": f"close_{label}"}), on="code", how="left")
+        result[f"return_{label}"] = (
+            pd.to_numeric(result["close_latest"], errors="coerce")
+            / pd.to_numeric(result[f"close_{label}"], errors="coerce")
+            - 1
+        ) * 100
+
+    return result.drop(columns=[column for column in result.columns if column.startswith("close")])
 
 
 def _fill_missing_by_industry(df: pd.DataFrame, factor_cols: List[str], industry_col: str = "sw_industry_name") -> pd.DataFrame:
@@ -646,7 +728,11 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
         cache = DataCache()
 
     date_str = datetime.now().strftime("%Y%m%d")
-    cache_key = cache._build_key("tushare" if use_tushare else "akshare", "CN", "ALL", date_str) if cache else ""
+    api_url = os.environ.get("TUSHARE_API_URL", "").strip()
+    endpoint_key = hashlib.sha256(api_url.encode("utf-8")).hexdigest()[:8] if api_url else "official"
+    source_key = f"tushare_{endpoint_key}" if use_tushare else "akshare"
+    cache_key = cache._build_key(source_key, "CN", "ALL", date_str) if cache else ""
+    provider_errors: List[str] = []
 
     # 1. 尝试缓存
     if use_cache and cache is not None:
@@ -665,62 +751,74 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
     # 2. 尝试 Tushare Pro
     if use_tushare:
         try:
-            import tushare as ts
-            token = os.environ.get("TUSHARE_TOKEN", "")
-            api_url = os.environ.get("TUSHARE_API_URL", "")
-            if token:
-                pro = ts.pro_api(token)
+            pro = create_tushare_client()
+            if pro:
                 if api_url:
-                    pro._DataApi__http_url = api_url
-                    logger.info("使用自定义 Tushare API 地址: %s", api_url)
+                    logger.info("Using custom Tushare API endpoint: %s", api_url)
                 logger.info("尝试通过 Tushare Pro 获取 A 股数据...")
 
                 # 获取股票基础信息
-                df_basic = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name,industry")
+                df_basic = pro.stock_basic(
+                    exchange="",
+                    list_status="L",
+                    fields="ts_code,symbol,name,industry,list_date",
+                )
                 if df_basic is not None and not df_basic.empty:
                     df_basic = _map_columns(df_basic, A_SHARE_FIELD_MAP)
+                    if stock_codes:
+                        requested = {str(code).split(".")[0] for code in stock_codes}
+                        symbols = df_basic["code"].astype(str).str.split(".").str[0]
+                        df_basic = df_basic.loc[symbols.isin(requested)].copy()
 
                 # 获取每日指标（估值 + 部分财务）
-                df_daily = pro.daily_basic(trade_date=date_str)
-                if df_daily is None or df_daily.empty:
-                    # 尝试前一个交易日
-                    trade_date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                    df_daily = pro.daily_basic(trade_date=trade_date)
+                daily_fields = (
+                    "ts_code,trade_date,close,turnover_rate,turnover_rate_f,volume_ratio,"
+                    "pe_ttm,pb,ps_ttm,dv_ttm,total_share,float_share,free_share,total_mv,circ_mv"
+                )
+                df_daily = pd.DataFrame()
+                trade_date = ""
+                for candidate_date in recent_open_trade_dates(pro):
+                    candidate = pro.daily_basic(trade_date=candidate_date, fields=daily_fields)
+                    if candidate is not None and not candidate.empty:
+                        trade_date = candidate_date
+                        df_daily = candidate
+                        break
+                if df_daily.empty:
+                    raise TushareClientError("daily_basic returned no rows for recent open trading days")
 
                 if df_daily is not None and not df_daily.empty:
                     df_daily = _map_columns(df_daily, A_SHARE_FIELD_MAP)
 
-                # 获取财务数据（可选，失败不影响整体流程）
-                df_fin = None
                 try:
-                # 取第一只股票的ts_code作为示例查询（批量需逐只获取）
-                    sample_code = df_basic["code"].iloc[0] if df_basic is not None and not df_basic.empty else None
-                    if sample_code:
-                        df_fin = pro.fina_indicator(ts_code=sample_code, period=str(int(date_str[:4]) - 1))
-                        if df_fin is not None and not df_fin.empty:
-                            df_fin = _map_columns(df_fin, A_SHARE_FIELD_MAP)
-                except Exception as e:
-                    logger.warning("Tushare 财务数据获取失败（可忽略）: %s", e)
-                    df_fin = None
+                    df_snapshot = pro.bak_basic(
+                        trade_date=trade_date,
+                        fields="trade_date,ts_code,name,industry,pe,pb,rev_yoy,profit_yoy,gpr,npr",
+                    )
+                    if df_snapshot is not None and not df_snapshot.empty:
+                        df_snapshot = _map_columns(df_snapshot, A_SHARE_FIELD_MAP)
+                except Exception as exc:
+                    logger.warning("Tushare bak_basic enrichment unavailable: %s", exc)
+                    df_snapshot = pd.DataFrame()
+                try:
+                    df_momentum = _fetch_tushare_momentum(pro, df_daily, trade_date)
+                except Exception as exc:
+                    logger.warning("Tushare momentum enrichment unavailable: %s", exc)
+                    df_momentum = pd.DataFrame()
+
+                # This compatible service requires ts_code for fina_indicator.
+                # Limit the optional enrichment to small explicit requests so
+                # full-universe screening stays within latency/rate limits.
+                requested_ts_codes = [] if df_basic is None else df_basic["code"].astype(str).tolist()
+                df_fin = _fetch_tushare_financials(pro, requested_ts_codes) if stock_codes else pd.DataFrame()
 
                 # 合并
                 result = df_basic.copy() if df_basic is not None else pd.DataFrame()
-                for merge_df in (df_daily, df_fin):
+                for merge_df in (df_daily, df_snapshot, df_momentum, df_fin):
                     if merge_df is not None and not merge_df.empty and not result.empty:
                         result = result.merge(merge_df, on="code", how="left", suffixes=("", "_dup"))
                         # 去重列
                         dup_cols = [c for c in result.columns if c.endswith("_dup")]
                         result = result.drop(columns=dup_cols, errors="ignore")
-
-                # 获取预期数据（分析师一致预期）
-                try:
-                    df_exp = pro.forecast(period=date_str[:4])
-                    if df_exp is not None and not df_exp.empty:
-                        df_exp = _map_columns(df_exp, EXPECTATION_FIELD_MAP)
-                        if "code" in df_exp.columns:
-                            result = result.merge(df_exp[["code", "sue", "eps_revision", "rating_revision"]], on="code", how="left")
-                except Exception as e:
-                    logger.warning("Tushare 预期数据获取失败: %s", e)
 
                 # 只要result不为空就返回（财务数据是可选的）
                 if result is not None and not result.empty:
@@ -728,12 +826,14 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
                     result = _annotate_source(result, "tushare", False, max_stocks)
                     if use_cache and cache is not None:
                         cache.set(cache_key, result, data_source="tushare", market="CN", max_age_hours=24)
-                    logger.info("Tushare Pro 获取 A 股数据成功: %d 行", len(result))
+                    logger.info("Tushare Pro returned %d A-share rows for %s", len(result), trade_date)
                     return result
-        except ImportError:
-            logger.warning("Tushare Pro 未安装，跳过")
+        except TushareClientError as exc:
+            provider_errors.append(str(exc))
+            logger.warning("Tushare client unavailable: %s", exc)
         except Exception as e:
-            logger.warning("Tushare Pro 获取失败: %s，降级到 akshare", e)
+            provider_errors.append(f"Tushare request failed: {e}")
+            logger.warning("Tushare request failed, falling back to akshare: %s", e)
 
     # 3. 尝试 akshare
     try:
@@ -832,13 +932,16 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
                 return spot_df
     except ImportError:
         logger.warning("akshare 未安装，跳过")
+        provider_errors.append("akshare is not installed")
     except Exception as e:
         logger.warning("akshare 获取失败: %s，降级到 mock", e)
+        provider_errors.append(f"akshare request failed: {e}")
 
     # 4. Mock 数据 fallback
     if not allow_mock:
+        details = "; ".join(provider_errors) or "no provider returned usable data"
         raise DataSourceUnavailable(
-            "A-share research data is unavailable. Configure TUSHARE_TOKEN or install akshare; synthetic fallback is disabled."
+            "A-share research data is unavailable and synthetic fallback is disabled. " + details
         )
     logger.info("使用 mock 数据作为 A 股最终 fallback")
     mock_df = _generate_mock_a_share(n=len(stock_codes) if stock_codes else 100)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -13,6 +15,7 @@ import streamlit as st
 from backtest.engine import BacktestConfig, analyze_backtest_results, run_backtest
 from core.main import score_universe
 from data.unified_fetcher import DataSourceUnavailable, fetch_a_share_data, fetch_us_data
+from data.tushare_client import TushareClientError, probe_tushare_connection
 from utils.mock import generate_mock_data
 
 
@@ -45,8 +48,81 @@ def _style() -> None:
     )
 
 
+def _secret_value(name: str) -> str:
+    """Read a top-level Streamlit secret without requiring a local secrets file."""
+    secret_paths = [Path.home() / ".streamlit" / "secrets.toml", Path.cwd() / ".streamlit" / "secrets.toml"]
+    if not any(path.exists() for path in secret_paths):
+        return ""
+    try:
+        value = st.secrets[name]
+    except Exception:
+        return ""
+    return str(value).strip()
+
+
+def _configure_research_api() -> str:
+    """Load provider settings from Secrets and optional sidebar overrides."""
+    env_token = os.environ.get("TUSHARE_TOKEN", "").strip()
+    env_url = os.environ.get("TUSHARE_API_URL", "").strip()
+    env_alpha = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
+    current_token = env_token or _secret_value("TUSHARE_TOKEN")
+    current_url = env_url or _secret_value("TUSHARE_API_URL")
+    current_alpha = env_alpha or _secret_value("ALPHA_VANTAGE_API_KEY")
+
+    with st.sidebar.expander("Research API configuration"):
+        token_override = st.text_input(
+            "Tushare token override",
+            type="password",
+            help="Leave blank to use TUSHARE_TOKEN from Streamlit Secrets.",
+        ).strip()
+        api_url = st.text_input(
+            "Tushare API URL",
+            value=current_url,
+            placeholder="https://ts.gyzcloud.top/api",
+            help="Use the proxy URL supplied with the token, or leave blank for official Tushare.",
+        ).strip()
+        alpha_override = st.text_input(
+            "Alpha Vantage key override",
+            type="password",
+            help="Leave blank to use ALPHA_VANTAGE_API_KEY from Streamlit Secrets.",
+        ).strip()
+
+        effective_token = token_override or current_token
+        effective_alpha = alpha_override or current_alpha
+        if effective_token:
+            os.environ["TUSHARE_TOKEN"] = effective_token
+        if api_url:
+            os.environ["TUSHARE_API_URL"] = api_url
+        else:
+            os.environ.pop("TUSHARE_API_URL", None)
+        if effective_alpha:
+            os.environ["ALPHA_VANTAGE_API_KEY"] = effective_alpha
+
+        status = "configured" if effective_token else "missing"
+        st.caption(f"Tushare token: {status}. Endpoint: {api_url or 'official API'}")
+        if st.button("Test Tushare connection", use_container_width=True):
+            try:
+                summary = probe_tushare_connection(effective_token, api_url)
+                st.success(
+                    f"Connected: {summary['listed_stocks']:,} listed stocks; "
+                    f"latest open date {summary['trade_date']}."
+                )
+            except TushareClientError as exc:
+                st.error(str(exc))
+
+    signature_value = f"{effective_token}|{api_url}|{effective_alpha}"
+    return hashlib.sha256(signature_value.encode("utf-8")).hexdigest()[:12]
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_universe(data_mode: str, market: str, n_stocks: int, seed: int) -> pd.DataFrame:
+def _load_universe(
+    data_mode: str,
+    market: str,
+    n_stocks: int,
+    seed: int,
+    provider_signature: str,
+) -> pd.DataFrame:
+    del provider_signature
     if data_mode == "Synthetic demo":
         return generate_mock_data(n_stocks=n_stocks, seed=seed)
     if market == "CN":
@@ -72,7 +148,14 @@ def _radar(top_picks: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def _screening_tab(data_mode: str, market: str, n_stocks: int, top_n: int, seed: int) -> None:
+def _screening_tab(
+    data_mode: str,
+    market: str,
+    n_stocks: int,
+    top_n: int,
+    seed: int,
+    provider_signature: str,
+) -> None:
     left, right = st.columns([1.4, 1])
     with left:
         st.subheader("Stock screening")
@@ -83,7 +166,7 @@ def _screening_tab(data_mode: str, market: str, n_stocks: int, top_n: int, seed:
     if run:
         try:
             with st.spinner("Loading and scoring the universe..."):
-                universe = _load_universe(data_mode, market, n_stocks, seed)
+                universe = _load_universe(data_mode, market, n_stocks, seed, provider_signature)
                 scored, top_picks = score_universe(universe, top_n)
                 st.session_state["screening"] = (scored, top_picks)
         except DataSourceUnavailable as exc:
@@ -184,20 +267,7 @@ def main() -> None:
     top_n = st.sidebar.slider("Top N", 5, 50, 20, 5)
     seed = st.sidebar.number_input("Demo seed", min_value=1, max_value=999999, value=42)
 
-    with st.sidebar.expander("Research API configuration"):
-        tushare = st.text_input("Tushare token", type="password")
-        tushare_url = st.text_input(
-            "Tushare API URL (optional)",
-            placeholder="https://ts.gyzcloud.top/api",
-            help="Leave empty for official Tushare API. Fill in for third-party proxy services.",
-        )
-        alpha = st.text_input("Alpha Vantage key", type="password")
-        if tushare:
-            os.environ["TUSHARE_TOKEN"] = tushare
-        if tushare_url:
-            os.environ["TUSHARE_API_URL"] = tushare_url
-        if alpha:
-            os.environ["ALPHA_VANTAGE_API_KEY"] = alpha
+    provider_signature = _configure_research_api()
 
     css_class = "mode-demo" if data_mode == "Synthetic demo" else "mode-research"
     st.markdown(
@@ -206,7 +276,7 @@ def main() -> None:
     )
     screen_tab, backtest_tab, method_tab = st.tabs(["Screening", "Backtest", "Methodology"])
     with screen_tab:
-        _screening_tab(data_mode, market, n_stocks, top_n, int(seed))
+        _screening_tab(data_mode, market, n_stocks, top_n, int(seed), provider_signature)
     with backtest_tab:
         _backtest_tab(top_n, int(seed))
     with method_tab:

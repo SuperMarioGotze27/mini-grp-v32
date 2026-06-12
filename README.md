@@ -88,8 +88,18 @@ Configure one or more credentials:
 
 ```bash
 set TUSHARE_TOKEN=your_token
+set TUSHARE_API_URL=https://ts.gyzcloud.top/api
 set ALPHA_VANTAGE_API_KEY=your_key
 ```
+
+For Streamlit Community Cloud, add the same names under **App settings → Secrets**:
+
+```toml
+TUSHARE_TOKEN = "your_rotated_token"
+TUSHARE_API_URL = "https://ts.gyzcloud.top/api"
+```
+
+The sidebar connection test verifies the token and endpoint without displaying or storing the token. Research screening uses the latest published `daily_basic` date, even when the current trading day is still in progress.
 
 Then run, for example:
 
