@@ -23,10 +23,11 @@ Open `http://localhost:8501`, run screening, then run the synthetic backtest. Th
 
 ```toml
 TUSHARE_TOKEN = "..."
+TUSHARE_API_URL = "https://ts.gyzcloud.top/api"
 ALPHA_VANTAGE_API_KEY = "..."
 ```
 
-The application also accepts keys entered in the sidebar for the current process. Do not commit tokens or `.streamlit/secrets.toml`.
+The application reads these values directly from Streamlit Secrets. It also accepts temporary sidebar overrides and provides a **Test Tushare connection** button. Do not commit tokens or `.streamlit/secrets.toml`.
 
 ## Docker
 
@@ -52,7 +53,11 @@ For provider adapters, build an image that installs `requirements-research.txt`,
 
 **Research data unavailable**
 
-Install `requirements-research.txt`, check credentials, and verify the selected provider is reachable. This error is intentional; research mode will not disguise missing data with a demo universe.
+Check `TUSHARE_TOKEN` and `TUSHARE_API_URL` in Streamlit Secrets, then use **Test Tushare connection** in the sidebar. Compatible proxy tokens require their supplied API URL; sending them to the official endpoint will fail. Research mode intentionally refuses to disguise missing data with a demo universe.
+
+**Tushare connects but screening raises a pandas TypeError**
+
+Upgrade to the current branch. Tushare can return both `pe`/`pe_ttm` and `ps`/`ps_ttm`; older builds mapped these into duplicate columns and the factor engine received a two-dimensional value.
 
 **Streamlit starts but charts do not appear**
 
