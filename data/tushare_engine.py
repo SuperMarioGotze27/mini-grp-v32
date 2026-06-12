@@ -268,14 +268,18 @@ def _generate_mock_rating_data(ts_code: str, n: int = 20) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def get_tushare_pro(token: Optional[str] = None) -> Optional[object]:
+def get_tushare_pro(token: Optional[str] = None,
+                    api_url: Optional[str] = None) -> Optional[object]:
     """获取 Tushare Pro API 实例。
 
     优先从环境变量 TUSHARE_TOKEN 读取，其次从参数传入。
-    如果 tushare 未安装或 token 无效，返回 None。
+    支持自定义 API URL（如第三方 Tushare 代理服务），通过环境变量
+    TUSHARE_API_URL 或参数传入。
 
     Args:
         token: Tushare Pro API Token，若 None 则从环境变量读取
+        api_url: 自定义 API 地址，若 None 则从环境变量 TUSHARE_API_URL
+                 读取，若仍为空则使用 Tushare 官方默认地址
 
     Returns:
         Tushare Pro API 实例，或 None
@@ -291,8 +295,16 @@ def get_tushare_pro(token: Optional[str] = None) -> Optional[object]:
         logger.warning("未提供 TUSHARE_TOKEN，无法初始化 Tushare Pro 客户端")
         return None
 
+    effective_url = api_url or os.environ.get('TUSHARE_API_URL', '')
+
     try:
         pro = ts.pro_api(effective_token)
+
+        # 如果指定了自定义 API URL，则替换内部请求地址
+        if effective_url:
+            pro._DataApi__http_url = effective_url
+            logger.info(f"使用自定义 Tushare API 地址: {effective_url}")
+
         # 简单验证：尝试获取一条市场数据
         test_df = pro.trade_cal(exchange='SSE', limit=1)
         if test_df is None or test_df.empty:
