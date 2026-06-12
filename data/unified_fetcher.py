@@ -667,8 +667,11 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
         try:
             import tushare as ts
             token = os.environ.get("TUSHARE_TOKEN", "")
-            if token:
+                        if token:
                 pro = ts.pro_api(token)
+                if api_url:
+                    pro._DataApi__http_url = api_url
+                    logger.info("使用自定义 Tushare API 地址: %s", api_url)
                 logger.info("尝试通过 Tushare Pro 获取 A 股数据...")
 
                 # 获取股票基础信息
