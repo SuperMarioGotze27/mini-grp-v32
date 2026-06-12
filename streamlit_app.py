@@ -186,9 +186,16 @@ def main() -> None:
 
     with st.sidebar.expander("Research API configuration"):
         tushare = st.text_input("Tushare token", type="password")
+        tushare_url = st.text_input(
+            "Tushare API URL (optional)",
+            placeholder="https://ts.gyzcloud.top/api",
+            help="Leave empty for official Tushare API. Fill in for third-party proxy services.",
+        )
         alpha = st.text_input("Alpha Vantage key", type="password")
         if tushare:
             os.environ["TUSHARE_TOKEN"] = tushare
+        if tushare_url:
+            os.environ["TUSHARE_API_URL"] = tushare_url
         if alpha:
             os.environ["ALPHA_VANTAGE_API_KEY"] = alpha
 
