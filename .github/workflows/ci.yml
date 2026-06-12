@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m compileall -q .
+      - run: pytest
+      - run: python -m core.main --mode screen --data-mode demo --max-stocks 60 --top-n 10 --output-dir output/ci
+      - run: python -m core.main --mode backtest --data-mode demo --start-date 2023-01-01 --end-date 2024-12-31 --max-stocks 60 --top-n 10 --output-dir output/ci
