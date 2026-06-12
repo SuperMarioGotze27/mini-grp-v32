@@ -18,6 +18,10 @@ from research.storage import FACTOR_COLUMNS, ResearchStore
 logger = logging.getLogger(__name__)
 
 
+class EmptyTushareResponse(RuntimeError):
+    """Raised when a required Tushare endpoint unexpectedly returns no rows."""
+
+
 @dataclass(frozen=True)
 class CollectionConfig:
     months: int = 48
@@ -36,7 +40,7 @@ class TushareSnapshotCollector:
         self.config = config
         self._last_call = 0.0
 
-    def _call(self, method: str, **kwargs: Any) -> pd.DataFrame:
+    def _call(self, method: str, require_rows: bool = False, **kwargs: Any) -> pd.DataFrame:
         for attempt in range(self.config.max_retries + 1):
             elapsed = time.monotonic() - self._last_call
             wait = self.config.throttle_seconds - elapsed
@@ -45,8 +49,11 @@ class TushareSnapshotCollector:
             try:
                 result = getattr(self.client, method)(**kwargs)
                 self._last_call = time.monotonic()
-                return pd.DataFrame() if result is None else result
-            except requests.RequestException as exc:
+                frame = pd.DataFrame() if result is None else result
+                if require_rows and frame.empty:
+                    raise EmptyTushareResponse(f"{method} returned no rows")
+                return frame
+            except (requests.RequestException, EmptyTushareResponse) as exc:
                 self._last_call = time.monotonic()
                 if attempt >= self.config.max_retries:
                     raise
@@ -74,6 +81,7 @@ class TushareSnapshotCollector:
         start = snapshot_end - timedelta(days=max(500, self.config.months * 35 + 420))
         calendar = self._call(
             "trade_cal",
+            require_rows=True,
             exchange="SSE",
             start_date=start.strftime("%Y%m%d"),
             end_date=calendar_end.strftime("%Y%m%d"),
@@ -97,15 +105,19 @@ class TushareSnapshotCollector:
         return month_ends.tail(months).tolist()
 
     def _daily_close(self, trade_date: str) -> pd.DataFrame:
-        frame = self._call("daily", trade_date=trade_date, fields="ts_code,trade_date,close")
-        if frame.empty:
-            return frame
+        frame = self._call(
+            "daily",
+            require_rows=True,
+            trade_date=trade_date,
+            fields="ts_code,trade_date,close",
+        )
         return frame[["ts_code", "close"]].rename(columns={"ts_code": "code"})
 
     def collect_date(self, snapshot_date: str, open_dates: list[str]) -> pd.DataFrame:
         index = open_dates.index(snapshot_date)
         daily_basic = self._call(
             "daily_basic",
+            require_rows=True,
             trade_date=snapshot_date,
             fields=(
                 "ts_code,trade_date,close,pe_ttm,pb,ps_ttm,dv_ttm,"

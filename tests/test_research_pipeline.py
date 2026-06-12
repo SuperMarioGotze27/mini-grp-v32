@@ -79,6 +79,30 @@ def test_collector_retries_transient_request_failure(monkeypatch):
     assert result.iloc[0]["ts_code"] == "000001.SZ"
 
 
+def test_collector_retries_empty_required_response(monkeypatch):
+    class EmptyThenReadyClient:
+        def __init__(self):
+            self.calls = 0
+
+        def daily(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return pd.DataFrame()
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+
+    client = EmptyThenReadyClient()
+    collector = TushareSnapshotCollector(
+        client,
+        config=CollectionConfig(throttle_seconds=0, max_retries=1),
+    )
+    monkeypatch.setattr("research.collector.time.sleep", lambda _: None)
+
+    result = collector._call("daily", require_rows=True, trade_date="20260101")
+
+    assert client.calls == 2
+    assert result.iloc[0]["ts_code"] == "000001.SZ"
+
+
 def test_storage_training_inference_and_backtest(tmp_path):
     store = _research_store(tmp_path)
     dates = pd.date_range("2023-01-31", periods=14, freq=pd.offsets.MonthEnd())

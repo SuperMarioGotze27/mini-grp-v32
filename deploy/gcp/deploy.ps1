@@ -46,7 +46,7 @@ gcloud run jobs deploy $JobName `
     --memory 4Gi `
     --task-timeout 3600s `
     --max-retries 1 `
-    --add-cloudsql-instances $InstanceConnection `
+    --set-cloudsql-instances $InstanceConnection `
     --set-secrets "TUSHARE_TOKEN=mini-grp-tushare-token:latest,DATABASE_URL=mini-grp-database-url:latest" `
     --set-env-vars "TUSHARE_API_URL=https://ts.gyzcloud.top/api"
 
