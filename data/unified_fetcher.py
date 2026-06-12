@@ -667,7 +667,7 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
         try:
             import tushare as ts
             token = os.environ.get("TUSHARE_TOKEN", "")
-                        if token:
+    if token:
                 pro = ts.pro_api(token)
                 if api_url:
                     pro._DataApi__http_url = api_url
