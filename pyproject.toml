@@ -1,0 +1,9 @@
+[project]
+name = "mini-grp"
+version = "3.3.0"
+description = "Auditable multi-factor stock screening and walk-forward research framework"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

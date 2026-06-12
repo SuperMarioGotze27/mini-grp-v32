@@ -1,149 +1,161 @@
-# Mini-GRP v3.2 — 量化选股与回测系统
+# Mini-GRP v3.3
 
-> **设计参考**: Principal Global Investors GRP (Global Research Platform)
+An auditable multi-factor stock screening and walk-forward research framework inspired by publicly described ideas behind Principal's Global Research Platform (GRP).
 
-Mini-GRP 是一个数据驱动的量化选股系统，支持 A 股、美股、港股等多市场，集成 19 个核心因子、5 维度评分体系、ML 增强与 Walk-forward 回测框架。
+Mini-GRP is a research and interview project, not an automated trading product. It turns a broad stock universe into an explainable shortlist, while keeping synthetic demonstrations visibly separated from genuine market data.
 
----
+## What Changed in v3.3
 
-## 目录结构
+- Restored the complete modular codebase to GitHub instead of publishing only deployment stubs.
+- Fixed the broken `app.py` entry point and removed duplicated scoring/backtest logic.
+- Added explicit `demo` and `research` data modes. Research mode refuses synthetic fallback.
+- Added provenance fields: `data_source`, `is_mock`, `as_of_date`, `factor_coverage`, and `expectation_source`.
+- Standardized factors within each market before cross-market ranking.
+- Excluded missing or constant factors and dynamically re-normalized active dimension weights.
+- Rebuilt the walk-forward engine with deterministic dates, turnover-based costs, equal-weight benchmark, frequency-aware annualization, IC/ICIR, and hard failure gates.
+- Added reproducible CSV/JSON artifacts, automated tests, GitHub Actions CI, Docker support, and a verified Streamlit interface.
 
-```
-mini_grp_v32/
-├── README.md                          # 项目说明
-├── requirements.txt                   # 依赖清单
-├── app.py                             # Streamlit 应用入口（预留）
-├── config/                            # 配置与模型治理
-│   ├── __init__.py
-│   └── settings.py                    # Champion-Challenger 框架、模型治理
-├── core/                              # 核心引擎
-│   ├── __init__.py
-│   ├── factor_engine.py              # 19 因子计算
-│   ├── scoring_engine.py             # 5 维度评分
-│   └── main.py                       # CLI 主入口
-├── data/                              # 数据层
-│   ├── __init__.py
-│   ├── data_engine.py                # 旧版 akshare/yfinance
-│   ├── tushare_engine.py            # Tushare Pro (A股)
-│   ├── alpha_vantage_engine.py       # Alpha Vantage (美股)
-│   └── unified_fetcher.py           # 统一数据接口 + 本地缓存
-├── backtest/                          # 回测层
-│   ├── __init__.py
-│   └── engine.py                     # Walk-forward 回测
-├── ml/                                # ML 增强
-│   ├── __init__.py
-│   ├── selector.py                   # XGBoost 因子选择
-│   ├── nonlinear_scorer.py          # 非线性评分
-│   ├── regime_detector.py           # HMM 市场环境检测
-│   ├── bandit.py                    # MAB 动态权重
-│   └── validator.py                # 因子验证
-├── analytics/                         # 分析工具
-│   ├── __init__.py
-│   ├── diversifier.py              # 相关性分散
-│   ├── distance_corr.py            # 距离相关
-│   ├── monte_carlo.py              # MC 风险分析
-│   ├── voi.py                      # 信息价值
-│   └── benchmark.py                # 基准模型
-├── viz/                               # 可视化
-│   ├── __init__.py
-│   └── visualizer.py               # 报告生成与图表
-├── utils/                             # 工具
-│   ├── __init__.py
-│   └── mock.py                     # Mock 数据生成
-├── tests/                             # 测试（预留）
-│   └── __init__.py
-├── cache/                             # 运行时缓存
-└── output/                            # 运行时输出
+## Research Workflow
+
+```text
+Market data / synthetic demo
+        |
+        v
+Provenance and schema validation
+        |
+        v
+Winsorization -> market-local z-score -> factor direction
+        |
+        v
+Value / Quality / Growth / Momentum / Expectation
+        |
+        v
+Dynamic weighted score -> percentile rank -> industry rank
+        |
+        +--------------------+
+        |                    |
+        v                    v
+Top-N screening       Walk-forward evaluation
 ```
 
----
+## Factor Model
 
-## 快速开始
+| Dimension | Weight | Factors |
+|---|---:|---|
+| Value | 25% | PE, PB, PS, EV/EBITDA, dividend yield |
+| Quality | 25% | ROE, ROA, gross margin, net margin, debt/equity |
+| Growth | 15% | revenue growth, profit growth, FCF yield |
+| Momentum | 15% | 1-month, 3-month, 12-month return |
+| Expectation | 20% | SUE, EPS revision, rating revision |
 
-### 1. 安装依赖
+If a dimension has no usable provider data, it is excluded and the remaining weights are normalized. Real-data adapters no longer fabricate expectation factors.
+
+## Quick Start
+
+Python 3.10+ is recommended.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API Key
-
-在环境变量或 `.env` 文件中配置数据源 API Key：
+Run the Streamlit application:
 
 ```bash
-export TUSHARE_TOKEN="your_tushare_token"
-export ALPHA_VANTAGE_API_KEY="your_av_key"
+streamlit run streamlit_app.py
 ```
 
-### 3. 运行命令
+Run deterministic demo screening:
 
-**A 股实时选股（默认）**
 ```bash
-python -m core.main --market cn
+python -m core.main --mode screen --data-mode demo --max-stocks 200 --top-n 20
 ```
 
-**美股实时选股**
+Run the synthetic walk-forward pipeline check:
+
 ```bash
-python -m core.main --market us --max-stocks 100
+python -m core.main --mode backtest --data-mode demo --start-date 2022-01-01 --end-date 2024-12-31
 ```
 
-**A 股回测（2020-2024）**
+## Research Data Mode
+
+Install optional provider adapters:
+
 ```bash
-python -m core.main --market cn --backtest --start-date 2020-01-01 --end-date 2024-12-31
+pip install -r requirements-research.txt
 ```
 
-**跨市场选股**
+Configure one or more credentials:
+
 ```bash
-python -m core.main --market cn us --max-stocks-per-market 50
+set TUSHARE_TOKEN=your_token
+set ALPHA_VANTAGE_API_KEY=your_key
 ```
 
-**启用 ML 增强**
+Then run, for example:
+
 ```bash
-python -m core.main --market cn --use-ml
+python -m core.main --mode screen --data-mode research --market cn --max-stocks 100
 ```
 
----
+Research mode raises a clear error when genuine data cannot be obtained. It never substitutes demo data.
 
-## 核心特性
+## Outputs
 
-| 特性 | 说明 |
-|------|------|
-| **19 因子** | Value / Quality / Growth / Momentum / Expectation 五维度共 19 个核心因子 |
-| **5 维度评分** | 价值、质量、成长、动量、预期差距，支持行业内排名与复合得分 |
-| **预期差距** | 接入分析师预期数据（SUE、EPS 修正、评级修正），捕捉预期差 |
-| **ML 增强** | XGBoost 因子选择、非线性评分、HMM 市场环境检测、MAB 动态权重 |
-| **回测框架** | Walk-forward 回测，支持月/季调仓、交易成本、绩效分析 |
-| **模型治理** | Champion-Challenger 框架、17 项上线检验清单、降级触发机制 |
-| **多市场** | A 股 (Tushare)、美股 (Alpha Vantage)、港股/日股/韩股 (yfinance) |
-| **统一数据** | 统一接口 + 本地缓存，自动降级到旧版接口或 Mock 数据 |
+Screening writes:
 
----
+- `screening_universe.csv`
+- `top_picks.csv`
+- `screening_manifest.json`
 
-## 文件分类说明
+Backtesting writes:
 
-| 目录 | 职责 | 关键文件 |
-|------|------|----------|
-| `core/` | 选股核心流程 | `factor_engine.py`, `scoring_engine.py`, `main.py` |
-| `data/` | 数据获取与缓存 | `unified_fetcher.py`, `tushare_engine.py`, `alpha_vantage_engine.py` |
-| `backtest/` | 策略回测与绩效分析 | `engine.py` |
-| `ml/` | 机器学习增强 | `selector.py`, `nonlinear_scorer.py`, `regime_detector.py`, `bandit.py` |
-| `analytics/` | 风险分析与基准 | `monte_carlo.py`, `diversifier.py`, `benchmark.py`, `voi.py` |
-| `viz/` | 可视化与报告 | `visualizer.py` |
-| `utils/` | 工具与 Mock | `mock.py` |
-| `config/` | 配置与治理 | `settings.py` (模型治理、Champion-Challenger) |
+- `periods.csv`
+- `equity.csv`
+- `holdings.csv`
+- `metrics.json`
+- `run_manifest.json`
+- `equity_curve.png`
 
----
+Each backtest period must contain selected holdings, valid returns, and finite NAV values. Invalid runs fail instead of returning zero-filled performance.
 
-## 版本历史
+## Validation
 
-- **v3.2** — 目录结构重构，模块化整理
-- **v3.1** — ML 增强（XGBoost、HMM、MAB）
-- **v3.0** — 统一数据接口、多市场支持
-- **v2.x** — 5 维度评分、Walk-forward 回测
-- **v1.x** — 基础因子计算与线性评分
+```bash
+pip install -r requirements-dev.txt
+python -m compileall -q .
+pytest
+```
 
----
+The CI workflow repeats compilation, tests, demo screening, and demo backtesting on every push and pull request.
 
-## 许可证
+## Project Structure
 
-仅供研究与学习使用。
+```text
+core/              factor processing, scoring, CLI orchestration
+data/              provider adapters, unified schema, local cache
+backtest/          walk-forward engine and performance artifacts
+analytics/         experimental analysis utilities
+ml/                optional ML overlays and validators
+viz/               legacy static reporting utilities
+utils/              deterministic synthetic data
+tests/              regression and integration tests
+docs/               project reports and deployment guidance
+streamlit_app.py    canonical web application
+app.py              compatibility wrapper
+```
+
+## Current Boundaries
+
+- The bundled backtest demo uses synthetic point-in-time data and is not evidence of an investable strategy.
+- A production research backtest still requires licensed historical point-in-time fundamentals, survivorship-bias-free constituents, corporate-action-adjusted prices, and release-date-aware analyst expectations.
+- Provider field coverage varies. `factor_coverage` and `expectation_source` should be reviewed before interpreting rankings.
+- Optional ML modules remain experimental and are deliberately outside the default scoring path.
+
+## Documentation
+
+- [Complete project report](docs/Mini-GRP-v33-Complete-Project-Report.md)
+- [Deployment guide](DEPLOY.md)
+
+## Disclaimer
+
+For research, education, and interview demonstration only. Nothing in this repository constitutes investment advice or a representation of historical or future performance.
