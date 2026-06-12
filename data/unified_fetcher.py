@@ -690,10 +690,18 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
                 if df_daily is not None and not df_daily.empty:
                     df_daily = _map_columns(df_daily, A_SHARE_FIELD_MAP)
 
-                # 获取财务数据
-                df_fin = pro.fina_indicator(period=str(int(date_str[:4]) - 1))
-                if df_fin is not None and not df_fin.empty:
-                    df_fin = _map_columns(df_fin, A_SHARE_FIELD_MAP)
+                # 获取财务数据（可选，失败不影响整体流程）
+                df_fin = None
+                try:
+                # 取第一只股票的ts_code作为示例查询（批量需逐只获取）
+                    sample_code = df_basic["code"].iloc[0] if df_basic is not None and not df_basic.empty else None
+                    if sample_code:
+                        df_fin = pro.fina_indicator(ts_code=sample_code, period=str(int(date_str[:4]) - 1))
+                        if df_fin is not None and not df_fin.empty:
+                            df_fin = _map_columns(df_fin, A_SHARE_FIELD_MAP)
+                except Exception as e:
+                    logger.warning("Tushare 财务数据获取失败（可忽略）: %s", e)
+                    df_fin = None
 
                 # 合并
                 result = df_basic.copy() if df_basic is not None else pd.DataFrame()
@@ -714,7 +722,8 @@ def fetch_a_share_data(stock_codes: Optional[List[str]] = None,
                 except Exception as e:
                     logger.warning("Tushare 预期数据获取失败: %s", e)
 
-                if not result.empty:
+                # 只要result不为空就返回（财务数据是可选的）
+                if result is not None and not result.empty:
                     result = _ensure_unified_columns(result, "CN", "CNY")
                     result = _annotate_source(result, "tushare", False, max_stocks)
                     if use_cache and cache is not None:
