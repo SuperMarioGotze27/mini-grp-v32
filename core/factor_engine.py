@@ -108,6 +108,21 @@ def winsorize(series: pd.Series, lower: float = 0.05, upper: float = 0.95) -> pd
     return result
 
 
+def winsorize_mad(series: pd.Series, n_mad: float = 3.0) -> pd.Series:
+    """Clip a series around its median using a scaled median absolute deviation."""
+    if series.empty or series.isna().all():
+        return series
+    valid = pd.to_numeric(series, errors="coerce").dropna()
+    if valid.empty:
+        return series
+    median = float(valid.median())
+    mad = float((valid - median).abs().median())
+    if mad <= 0 or not np.isfinite(mad):
+        return series
+    robust_sigma = 1.4826 * mad
+    return series.clip(lower=median - n_mad * robust_sigma, upper=median + n_mad * robust_sigma)
+
+
 def standardize(series: pd.Series) -> pd.Series:
     """
     标准化（Z-Score）
@@ -173,6 +188,26 @@ def neutralize_industry(factor: pd.Series, industry: pd.Series) -> pd.Series:
     return result
 
 
+def neutralize_market_cap(factor: pd.Series, market_cap: pd.Series) -> pd.Series:
+    """Remove linear log-market-cap exposure and return cross-sectional residuals."""
+    values = pd.DataFrame(
+        {
+            "factor": pd.to_numeric(factor, errors="coerce"),
+            "market_cap": pd.to_numeric(market_cap, errors="coerce"),
+        }
+    )
+    valid = values["factor"].notna() & values["market_cap"].gt(0)
+    if valid.sum() < 10 or values.loc[valid, "market_cap"].nunique() < 3:
+        return factor
+    x = np.log(values.loc[valid, "market_cap"].to_numpy(dtype=float))
+    design = np.column_stack([np.ones(len(x)), x])
+    y = values.loc[valid, "factor"].to_numpy(dtype=float)
+    coefficients, *_ = np.linalg.lstsq(design, y, rcond=None)
+    residual = pd.Series(np.nan, index=factor.index, dtype=float)
+    residual.loc[valid] = y - design @ coefficients
+    return residual
+
+
 # ---------------------------------------------------------------------------
 # 缺失值处理
 # ---------------------------------------------------------------------------
@@ -228,7 +263,10 @@ def fill_missing_by_industry(df: pd.DataFrame,
 def calculate_factors(raw_data: pd.DataFrame,
                       apply_winsorize: bool = True,
                       apply_standardize: bool = True,
-                      apply_industry_neutral: bool = False) -> pd.DataFrame:
+                      apply_industry_neutral: bool = False,
+                      winsorize_method: str = "quantile",
+                      apply_size_neutral: bool = False,
+                      market_cap_col: str = "market_cap") -> pd.DataFrame:
     """
     计算所有因子的标准化值
 
@@ -246,6 +284,9 @@ def calculate_factors(raw_data: pd.DataFrame,
         apply_winsorize: 是否进行去极值处理，默认 True
         apply_standardize: 是否进行标准化处理，默认 True
         apply_industry_neutral: 是否进行行业中性化，默认 False
+        winsorize_method: 去极值方法，支持 quantile 或 mad
+        apply_size_neutral: 是否使用对数市值 OLS 残差做市值中性化
+        market_cap_col: 当期市值字段名
 
     Returns:
         DataFrame: 原始数据 + 各因子标准化列（列名为 {column}_z）
@@ -259,6 +300,8 @@ def calculate_factors(raw_data: pd.DataFrame,
 
     result = raw_data.copy()
     n_total = len(result)
+    if winsorize_method not in {"quantile", "mad"}:
+        raise ValueError("winsorize_method must be 'quantile' or 'mad'")
 
     # ------------------------------------------------------------------
     # 1. 检查可用的因子列
@@ -319,7 +362,12 @@ def calculate_factors(raw_data: pd.DataFrame,
             direction = FACTOR_DIRECTIONS.get(factor_col, 1)
 
             def process_cross_section(values: pd.Series) -> pd.Series:
-                processed = winsorize(values) if apply_winsorize else values
+                if not apply_winsorize:
+                    processed = values
+                elif winsorize_method == "mad":
+                    processed = winsorize_mad(values)
+                else:
+                    processed = winsorize(values)
                 return standardize(processed) if apply_standardize else processed
 
             if market_col:
@@ -331,6 +379,10 @@ def calculate_factors(raw_data: pd.DataFrame,
 
             # 步骤 3: 方向调整（负向因子取反，使得越大越好）
             values = values * direction
+
+            if apply_size_neutral and market_cap_col in result.columns:
+                values = neutralize_market_cap(values, result[market_cap_col])
+                values = standardize(values) if apply_standardize else values
 
             # 步骤 4: （可选）行业中性化
             if apply_industry_neutral and industry_col and industry_col in result.columns:

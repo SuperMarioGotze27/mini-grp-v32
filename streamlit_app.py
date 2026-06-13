@@ -12,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from analytics.factor_research import extract_model_importance, run_factor_research
 from backtest.engine import BacktestConfig, analyze_backtest_results, run_backtest
 from core.main import score_universe
 from data.unified_fetcher import DataSourceUnavailable, fetch_a_share_data, fetch_us_data
@@ -19,6 +20,7 @@ from data.tushare_client import TushareClientError, probe_tushare_connection
 from research.backtest import run_snapshot_backtest
 from research.inference import apply_ml_overlay
 from research.storage import ResearchStore
+from research.trainer import prepare_training_panel
 from utils.mock import generate_mock_data
 
 
@@ -33,6 +35,10 @@ DIMENSION_LABELS = {
 LINEAR_MODE = "Linear baseline"
 APPROVED_ML_MODE = "Approved ML overlay"
 EXPERIMENTAL_ML_MODE = "Experimental ML candidate"
+
+
+def _factor_label(name: str) -> str:
+    return name.removesuffix("_z").replace("_", " ").title()
 
 
 def _style() -> None:
@@ -430,6 +436,155 @@ def _model_registry_tab(database_url: str | None) -> None:
         st.write(", ".join(displayed_model.features))
         st.dataframe(pd.DataFrame(metrics.get("factor_metrics", [])), use_container_width=True, hide_index=True)
 
+    importance = extract_model_importance(displayed_model.bundle)
+    if not importance.empty:
+        importance["label"] = importance["feature"].map(_factor_label)
+        st.plotly_chart(
+            px.bar(
+                importance.head(15).sort_values("importance"),
+                x="importance",
+                y="label",
+                orientation="h",
+                title="Native model feature importance",
+                labels={"importance": "Normalized importance", "label": "Feature"},
+            ),
+            use_container_width=True,
+        )
+        st.caption(
+            "Gradient Boosting uses normalized split importance; Ridge uses absolute coefficient magnitude. "
+            "This is a model diagnostic, not a SHAP attribution."
+        )
+
+
+def _factor_research_tab(database_url: str | None) -> None:
+    st.subheader("Single-factor research")
+    st.write(
+        "Evaluate every usable feature on stored point-in-time snapshots before it enters the combined score or ML model."
+    )
+    st.caption(
+        "Pass rule: mean Rank IC > 0.03, ICIR > 0.5, positive-IC ratio > 55%, and positive Q5-Q1 spread."
+    )
+
+    if st.button("Run factor diagnostics", type="primary", use_container_width=True):
+        try:
+            with st.spinner("Rebuilding dated factor panels and running cross-sectional tests..."):
+                snapshots = ResearchStore(database_url).load_snapshots(labelled_only=True)
+                panel = prepare_training_panel(snapshots)
+                features = list(panel.attrs["model_features"])
+                result = run_factor_research(panel, features)
+                st.session_state["factor_research"] = result
+        except Exception as exc:
+            st.exception(exc)
+
+    if "factor_research" not in st.session_state:
+        st.info("Run diagnostics to calculate IC, quintile, turnover, correlation, and decay results.")
+        return
+
+    result = st.session_state["factor_research"]
+    summary = result.summary.copy()
+    passing = int(summary["passed"].sum())
+    best = summary.iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Factors tested", len(summary))
+    c2.metric("Passing factors", passing)
+    c3.metric("Best mean Rank IC", f"{best['mean_rank_ic']:.3f}")
+    c4.metric("Best factor", _factor_label(str(best["factor"])))
+
+    chart = summary.copy()
+    chart["label"] = chart["factor"].map(_factor_label)
+    chart["status"] = chart["passed"].map({True: "Pass", False: "Fail"})
+    st.plotly_chart(
+        px.bar(
+            chart.sort_values("mean_rank_ic"),
+            x="mean_rank_ic",
+            y="label",
+            color="status",
+            orientation="h",
+            title="Mean monthly Rank IC by factor",
+            color_discrete_map={"Pass": "#0f766e", "Fail": "#94a3b8"},
+            labels={"mean_rank_ic": "Mean Rank IC", "label": "Factor"},
+        ),
+        use_container_width=True,
+    )
+
+    display = summary.copy()
+    display["factor"] = display["factor"].map(_factor_label)
+    percent_columns = [
+        "coverage",
+        "ic_positive_ratio",
+        "mean_top_bottom_spread",
+        "long_short_annualized",
+        "factor_turnover",
+    ]
+    for column in percent_columns:
+        display[column] = display[column].map(lambda value: "N/A" if pd.isna(value) else f"{value:.2%}")
+    for column in ["mean_rank_ic", "ic_std", "icir", "long_short_sharpe", "quantile_monotonicity", "rank_autocorrelation"]:
+        display[column] = display[column].map(lambda value: "N/A" if pd.isna(value) else f"{value:.3f}")
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+    selected = st.selectbox(
+        "Factor detail",
+        summary["factor"].tolist(),
+        format_func=_factor_label,
+    )
+    detail_left, detail_right = st.columns(2)
+    ic = result.ic_series[result.ic_series["factor"] == selected].copy()
+    if not ic.empty:
+        ic["snapshot_date"] = pd.to_datetime(ic["snapshot_date"])
+        with detail_left:
+            st.plotly_chart(
+                px.line(ic, x="snapshot_date", y="rank_ic", markers=True, title="Monthly Rank IC"),
+                use_container_width=True,
+            )
+
+    quantiles = result.quantile_returns[result.quantile_returns["factor"] == selected]
+    if not quantiles.empty:
+        mean_quantiles = quantiles.groupby("quantile", as_index=False)["forward_return"].mean()
+        mean_quantiles["quantile"] = mean_quantiles["quantile"].map(lambda value: f"Q{value}")
+        with detail_right:
+            st.plotly_chart(
+                px.bar(
+                    mean_quantiles,
+                    x="quantile",
+                    y="forward_return",
+                    title="Average forward return by quintile",
+                    labels={"forward_return": "Mean 20-day return", "quantile": "Portfolio"},
+                ),
+                use_container_width=True,
+            )
+
+    decay = result.decay[result.decay["factor"] == selected]
+    st.plotly_chart(
+        px.line(
+            decay,
+            x="lag_months",
+            y="mean_rank_ic",
+            markers=True,
+            title="IC lead/decay profile",
+            labels={"lag_months": "Return window lead (months)", "mean_rank_ic": "Mean Rank IC"},
+        ),
+        use_container_width=True,
+    )
+    st.caption(
+        "Lag 0 pairs the factor with its next 20-trading-day return. Lag N pairs today's factor with the "
+        "20-day return window beginning N monthly snapshots later."
+    )
+
+    correlation = result.factor_correlation.copy()
+    correlation.index = [_factor_label(value) for value in correlation.index]
+    correlation.columns = [_factor_label(value) for value in correlation.columns]
+    st.plotly_chart(
+        px.imshow(
+            correlation,
+            zmin=-1,
+            zmax=1,
+            color_continuous_scale="RdBu_r",
+            title="Average cross-sectional factor rank correlation",
+            aspect="auto",
+        ),
+        use_container_width=True,
+    )
+
 
 def main() -> None:
     st.set_page_config(page_title="Mini-GRP v3.4", layout="wide", initial_sidebar_state="expanded")
@@ -460,8 +615,8 @@ def main() -> None:
         f"<span class='{css_class}'>{data_mode}</span>",
         unsafe_allow_html=True,
     )
-    screen_tab, model_tab, backtest_tab, method_tab = st.tabs(
-        ["Screening", "Model registry", "Backtest", "Methodology"]
+    screen_tab, factor_tab, model_tab, backtest_tab, method_tab = st.tabs(
+        ["Screening", "Factor research", "Model registry", "Backtest", "Methodology"]
     )
     with screen_tab:
         _screening_tab(
@@ -474,6 +629,8 @@ def main() -> None:
             scoring_mode,
             database_url,
         )
+    with factor_tab:
+        _factor_research_tab(database_url)
     with model_tab:
         _model_registry_tab(database_url)
     with backtest_tab:
@@ -487,11 +644,12 @@ def main() -> None:
             3. Winsorize and standardize factors within each market, then apply directionality.
             4. Build Value, Quality, Growth, Momentum, and Expectation dimension scores.
             5. Store month-end point-in-time snapshots and calculate the following 20-trading-day label.
-            6. Validate Ridge and Gradient Boosting with expanding-window, out-of-sample folds.
-            7. Register a model only when rank IC and top-minus-bottom spread are both positive.
-            8. Blend an approved ML score into the linear baseline with a hard 30% maximum weight.
+            6. Validate each factor with monthly Rank IC, true ICIR, quintile monotonicity, turnover, correlation, and decay tests.
+            7. Validate Ridge and Gradient Boosting with expanding-window, out-of-sample folds.
+            8. Register a model only when rank IC and top-minus-bottom spread are both positive.
+            9. Blend an approved ML score into the linear baseline with a hard 30% maximum weight.
                A separately labelled experimental mode can run the latest candidate for comparison.
-            9. Backtest stored snapshots with explicit turnover costs and an equal-weight universe benchmark.
+            10. Backtest stored snapshots with explicit turnover costs and an equal-weight universe benchmark.
 
             The synthetic mode is for demonstrations and regression tests. Research mode refuses silent fallback to synthetic data.
             """

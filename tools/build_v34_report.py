@@ -89,7 +89,7 @@ def set_cell_shading(cell, fill: str) -> None:
     shading.set(qn("w:fill"), fill)
 
 
-def set_cell_margins(cell, top=80, start=120, bottom=80, end=120) -> None:
+def set_cell_margins(cell, top=50, start=120, bottom=50, end=120) -> None:
     tc = cell._tc
     tc_pr = tc.get_or_add_tcPr()
     tc_mar = tc_pr.first_child_found_in("w:tcMar")
@@ -136,6 +136,9 @@ def set_table_geometry(table, widths_dxa: list[int]) -> None:
         grid.append(col)
 
     for row in table.rows:
+        tr_pr = row._tr.get_or_add_trPr()
+        if tr_pr.find(qn("w:cantSplit")) is None:
+            tr_pr.append(OxmlElement("w:cantSplit"))
         for index, cell in enumerate(row.cells):
             width = widths_dxa[index]
             cell.width = Inches(width / 1440)
@@ -467,16 +470,12 @@ def build() -> None:
             set_run_font(run, 10.5, italic=True, color=NAVY)
         elif stripped.startswith("### "):
             current_numbering_id = None
-            doc.add_heading(stripped[4:], level=2)
+            heading = doc.add_heading(stripped[4:], level=2)
+            if stripped in {"### 5.2 政策权重", "### 7.4 线性真实快照回测"}:
+                heading.paragraph_format.page_break_before = True
         elif stripped.startswith("## "):
             current_numbering_id = None
             heading = doc.add_heading(stripped[3:], level=1)
-            if (
-                stripped.startswith("## 8.")
-                or stripped.startswith("## 9.")
-                or stripped.startswith("## 16.")
-            ):
-                heading.paragraph_format.page_break_before = True
         elif re.match(r"^\d+\.\s+", stripped):
             if current_numbering_id is None:
                 current_numbering_id = create_numbering_id(doc)

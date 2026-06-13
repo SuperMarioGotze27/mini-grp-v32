@@ -14,8 +14,8 @@ from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from analytics.factor_research import extract_model_importance, run_factor_research
 from core.main import score_universe
-from ml.nonlinear_scorer import FactorValidator
 from research.storage import FACTOR_COLUMNS, ResearchStore
 
 logger = logging.getLogger(__name__)
@@ -167,19 +167,7 @@ def train_and_register(store: ResearchStore, config: TrainingConfig = TrainingCo
     final_model = _candidate_models()[selected_name]
     final_model.fit(panel[features], panel["target_rank"])
 
-    factor_validator = FactorValidator()
-    factor_metrics = []
-    for feature in features:
-        series = factor_validator.compute_ic_series(panel, feature, "forward_return", "snapshot_date")
-        factor_metrics.append(
-            {
-                "feature": feature,
-                "mean_ic": float(series.mean()) if not series.empty else None,
-                "icir": float(series.mean() / series.std(ddof=1))
-                if len(series) > 1 and series.std(ddof=1) > 0
-                else None,
-            }
-        )
+    factor_research = run_factor_research(panel, features)
 
     selected_metrics = validation[selected_name]
     approved = (
@@ -203,7 +191,8 @@ def train_and_register(store: ResearchStore, config: TrainingConfig = TrainingCo
         "snapshot_dates": len(dates),
         "training_rows": int(len(panel)),
         "validation": validation,
-        "factor_metrics": factor_metrics,
+        "factor_metrics": factor_research.summary.replace({np.nan: None}).to_dict(orient="records"),
+        "model_importance": extract_model_importance(bundle).to_dict(orient="records"),
     }
     version = store.save_model(bundle, metrics, features, status=status)
     metrics["version"] = version

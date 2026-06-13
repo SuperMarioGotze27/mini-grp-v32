@@ -1,6 +1,6 @@
 import numpy as np
 
-from core.factor_engine import calculate_factors
+from core.factor_engine import calculate_factors, neutralize_market_cap, winsorize_mad
 from core.main import score_universe
 from utils.mock import generate_mock_data
 
@@ -36,3 +36,17 @@ def test_cross_market_standardization_is_market_local():
     factors = calculate_factors(__import__("pandas").concat([cn, us], ignore_index=True))
     means = factors.groupby("market")["pe_ttm_z"].mean().abs()
     assert (means < 1e-10).all()
+
+
+def test_mad_winsorization_clips_extreme_value():
+    series = __import__("pandas").Series([1.0, 1.1, 0.9, 1.05, 1000.0])
+    clipped = winsorize_mad(series)
+    assert clipped.iloc[-1] < 2.0
+
+
+def test_market_cap_neutralization_removes_log_size_exposure():
+    pandas = __import__("pandas")
+    market_cap = pandas.Series(np.geomspace(1e8, 1e12, 100))
+    factor = pandas.Series(np.log(market_cap) * 2.0 + np.sin(np.arange(100)))
+    residual = neutralize_market_cap(factor, market_cap)
+    assert abs(residual.corr(np.log(market_cap))) < 1e-10

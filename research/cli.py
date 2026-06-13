@@ -7,10 +7,11 @@ import json
 import logging
 from typing import Iterable, Optional
 
+from analytics.factor_research import FactorResearchConfig, run_factor_research
 from research.collector import CollectionConfig, collect_history
 from research.backtest import run_snapshot_backtest
 from research.storage import ResearchStore
-from research.trainer import TrainingConfig, train_and_register
+from research.trainer import TrainingConfig, prepare_training_panel, train_and_register
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     backtest = subparsers.add_parser("backtest")
     backtest.add_argument("--top-n", type=int, default=20)
     backtest.add_argument("--transaction-cost", type=float, default=0.001)
+    factors = subparsers.add_parser("factors")
+    factors.add_argument("--max-decay-lag", type=int, default=6)
     subparsers.add_parser("status")
     parser.add_argument("--database-url")
     return parser
@@ -67,6 +70,20 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             transaction_cost=args.transaction_cost,
         )
         output = {"metrics": metrics, "periods": results.to_dict(orient="records")}
+    if args.command == "factors":
+        snapshots = store.load_snapshots(labelled_only=True)
+        panel = prepare_training_panel(snapshots)
+        features = list(panel.attrs["model_features"])
+        result = run_factor_research(
+            panel,
+            features,
+            FactorResearchConfig(max_decay_lag=args.max_decay_lag),
+        )
+        output = {
+            "summary": json.loads(result.summary.to_json(orient="records")),
+            "decay": json.loads(result.decay.to_json(orient="records")),
+            "factor_correlation": json.loads(result.factor_correlation.to_json(orient="index")),
+        }
     print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
     return 0
 

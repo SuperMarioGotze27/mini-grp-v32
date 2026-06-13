@@ -26,7 +26,7 @@ docker build -t mini-grp-v34 .
 docker run --rm -p 8080:8080 -e PORT=8080 mini-grp-v34
 ```
 
-Open `http://localhost:8080` and verify all four tabs.
+Open `http://localhost:8080` and verify all five tabs.
 
 ## Google Cloud prerequisites
 
@@ -72,8 +72,9 @@ As of 2026-06-13, the reference deployment is running in project `project-009807
 | Scheduler | `mini-grp-monthly`, 20:00 Asia/Shanghai on the first day of each month |
 | Stored research data | 60 snapshot dates, 90,000 rows, 58 labelled periods |
 | Model state | one Gradient Boosting candidate, available in Experimental ML mode; no approved model |
+| Factor audit | 15 features, 58 labelled periods, 86,901 observations; no factor passed the strict stability gate |
 
-The web health endpoint and all four Streamlit tabs have been verified. The stored-snapshot backtest also runs successfully from the deployed web service.
+The web health endpoint and all five Streamlit tabs have been verified. The stored-snapshot backtest and single-factor audit also run successfully from the deployed web service.
 
 ## Runtime configuration
 
@@ -88,6 +89,7 @@ The web health endpoint and all four Streamlit tabs have been verified. The stor
 
 - Cloud Run health endpoint returns success.
 - `Model registry` shows snapshot counts and an approved model or a clear baseline-only state.
+- `Factor research` rebuilds the labelled panel and reports IC/ICIR, quintile spread, turnover, correlation, and decay without exposing secrets.
 - Research mode fails visibly when the provider is unavailable.
 - The scheduled job exits with code zero and refreshes only missing/recent dates.
 - Cloud SQL backups and point-in-time recovery are enabled.

@@ -12,8 +12,10 @@ This is a research and interview project, not an automated trading product or in
 - Expanding-window validation of Ridge and Gradient Boosting candidates.
 - Model registry with explicit `candidate` and `approved` states.
 - Approved ML overlay capped at 30% of the final score; the linear model remains the anchor.
+- Production single-factor diagnostics: monthly Rank IC/ICIR, quintile returns, turnover, correlation, and decay.
+- Native Ridge/Gradient Boosting feature importance for model explainability without making SHAP a runtime dependency.
 - Real stored-snapshot baseline backtest with turnover costs and an equal-weight benchmark.
-- Streamlit pages for screening, model monitoring, research backtesting, and methodology.
+- Streamlit pages for screening, factor research, model monitoring, research backtesting, and methodology.
 - Google Cloud Run service + Cloud Run Job + Cloud SQL deployment pattern.
 
 ## Architecture
@@ -25,7 +27,8 @@ Tushare live API
       |                                                                |
       +--> Month-end collector --> SQL snapshots --> walk-forward ML ---+--> bounded final score
                                          |                              |
-                                         +--> real snapshot backtest    +--> Streamlit / CSV
+                                         +--> factor diagnostics -------+--> Streamlit / CSV
+                                         +--> real snapshot backtest
 
 Cloud Run service: Streamlit UI and inference
 Cloud Run job: incremental collection and model training
@@ -65,6 +68,7 @@ Build monthly history and train the governed overlay:
 ```powershell
 python -m research.cli collect --months 60 --max-stocks 1500
 python -m research.cli train --overlay-weight 0.15
+python -m research.cli factors --max-decay-lag 6
 python -m research.cli status
 python -m research.cli backtest --top-n 20 --transaction-cost 0.001
 ```
@@ -81,6 +85,17 @@ The ML target is each stock's cross-sectional percentile rank of its future 20-t
 
 If no approved model exists, production inference retains the interpretable linear baseline. The Streamlit sidebar also exposes a clearly labelled `Experimental ML candidate` mode so researchers can inspect the latest candidate's ranking, validation IC, spread, algorithm, and bounded overlay without presenting it as approved.
 
+## Current factor audit
+
+The 2026-06-13 Cloud Run audit evaluated 15 model features across 58 labelled monthly periods and 86,901 stock-month observations. None passed the deliberately strict combined gate of mean IC above 0.03, ICIR above 0.50, positive-IC ratio above 55%, and a positive Q5-Q1 spread.
+
+- `PB LF` was strongest: mean Rank IC 0.0929, ICIR 0.4106, positive-IC ratio 60.3%, and mean monthly Q5-Q1 spread 1.35%.
+- The broader Value score was economically positive but unstable: mean IC 0.0791 and ICIR 0.3253.
+- Momentum was negative in this sample: dimension IC -0.0644, with the adverse signal fading toward zero over six months.
+- Within-dimension inputs are highly correlated, including Value versus PE/PB/PS/dividend yield and Quality versus gross/net margin. The next iteration should reduce redundancy before adding model complexity.
+
+These are research diagnostics, not evidence of live tradability. The strict gate correctly leaves all factors unapproved until stability improves.
+
 ## Google Cloud Run
 
 See [DEPLOY.md](DEPLOY.md) and [deploy/gcp/README.md](deploy/gcp/README.md). The repository includes a PowerShell deployment script that builds one image and deploys it as both a Cloud Run service and a Cloud Run Job.
@@ -91,6 +106,7 @@ The current public deployment is [mini-grp-web](https://mini-grp-web-l4pzrl64jq-
 
 ```text
 core/          factor processing and linear scoring
+analytics/     single-factor IC, quantile, turnover, correlation, decay diagnostics
 data/          Tushare and other provider adapters
 research/      snapshot storage, collection, training, inference, real backtest
 backtest/      deterministic synthetic pipeline checks
