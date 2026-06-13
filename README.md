@@ -85,6 +85,8 @@ If no approved model exists, the application refuses ML mode and retains the int
 
 See [DEPLOY.md](DEPLOY.md) and [deploy/gcp/README.md](deploy/gcp/README.md). The repository includes a PowerShell deployment script that builds one image and deploys it as both a Cloud Run service and a Cloud Run Job.
 
+The current public deployment is [mini-grp-web](https://mini-grp-web-l4pzrl64jq-de.a.run.app) in Google Cloud region `asia-east1`. Its initial 60-snapshot research pipeline completed successfully and intentionally left screening on the linear baseline because the trained candidate did not pass the model-approval thresholds.
+
 ## Project structure
 
 ```text

@@ -29,10 +29,18 @@ Deploy from the repository root:
 .\deploy\gcp\deploy.ps1 -ProjectId YOUR_PROJECT_ID
 ```
 
-Run the initial history build, then add a monthly Cloud Scheduler trigger in the Cloud Run job's **Triggers** tab:
+The deployment script creates the runtime service account, deploys both workloads, and creates or updates the monthly scheduler. Run the initial history build once:
 
 ```powershell
 gcloud run jobs execute mini-grp-research --region asia-east1 --wait
 ```
 
-Use a schedule such as `0 20 1 * *` with timezone `Asia/Shanghai`. The collector skips completed history and refreshes the latest two month-ends so newly available forward labels are filled in.
+The default scheduler is `mini-grp-monthly`, using `0 20 1 * *` with timezone `Asia/Shanghai`. The collector skips completed history and refreshes the latest two month-ends so newly available forward labels are filled in.
+
+Reference deployment verified on 2026-06-13:
+
+- Web: https://mini-grp-web-l4pzrl64jq-de.a.run.app
+- Region: `asia-east1`
+- Snapshot data: 60 dates and 90,000 rows
+- Model registry: one candidate and no approved model
+- Scheduler: enabled, next monthly run controlled by Cloud Scheduler

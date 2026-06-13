@@ -57,7 +57,23 @@ Run the initial 60-month pipeline:
 gcloud run jobs execute mini-grp-research --region asia-east1 --wait
 ```
 
-Then add a monthly scheduler trigger from the Cloud Run Job **Triggers** tab. A suitable schedule is `0 20 1 * *` in timezone `Asia/Shanghai`.
+The script also creates or updates a dedicated runtime service account and a monthly Cloud Scheduler trigger. The default schedule is `0 20 1 * *` in timezone `Asia/Shanghai`.
+
+## Current live deployment
+
+As of 2026-06-13, the reference deployment is running in project `project-00980766-847f-47d3-b03`, region `asia-east1`:
+
+| Resource | Current value |
+|---|---|
+| Web service | [mini-grp-web](https://mini-grp-web-l4pzrl64jq-de.a.run.app) |
+| Research job | `mini-grp-research` |
+| Cloud SQL | PostgreSQL 16, instance `mini-grp-postgres`, database `mini_grp` |
+| Runtime identity | `mini-grp-runtime@project-00980766-847f-47d3-b03.iam.gserviceaccount.com` |
+| Scheduler | `mini-grp-monthly`, 20:00 Asia/Shanghai on the first day of each month |
+| Stored research data | 60 snapshot dates, 90,000 rows, 58 labelled periods |
+| Model state | one Gradient Boosting candidate; no approved model |
+
+The web health endpoint and all four Streamlit tabs have been verified. The stored-snapshot backtest also runs successfully from the deployed web service.
 
 ## Runtime configuration
 
@@ -75,6 +91,7 @@ Then add a monthly scheduler trigger from the Cloud Run Job **Triggers** tab. A 
 - Research mode fails visibly when the provider is unavailable.
 - The scheduled job exits with code zero and refreshes only missing/recent dates.
 - Cloud SQL backups and point-in-time recovery are enabled.
+- Cloud SQL deletion protection is enabled.
 - Secret values never appear in logs, source files, or screenshots.
 
 ## Capacity notes
@@ -89,7 +106,7 @@ Ensure WSL 2 and Virtual Machine Platform are enabled, restart Windows, then lau
 
 **No approved model**
 
-Collect at least 11 labelled month-end snapshots. Approval is intentionally withheld when rank IC or top-bottom spread is non-positive.
+Approval is intentionally withheld when rank IC or top-bottom spread is non-positive. The current 58-period training set still has a negative candidate spread, so baseline-only operation is the correct state rather than a deployment error.
 
 **Cloud Run cannot connect to PostgreSQL**
 
