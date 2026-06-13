@@ -79,13 +79,13 @@ The ML target is each stock's cross-sectional percentile rank of its future 20-t
 - mean out-of-sample rank IC is positive;
 - mean top-minus-bottom future return spread is positive.
 
-If no approved model exists, the application refuses ML mode and retains the interpretable linear baseline.
+If no approved model exists, production inference retains the interpretable linear baseline. The Streamlit sidebar also exposes a clearly labelled `Experimental ML candidate` mode so researchers can inspect the latest candidate's ranking, validation IC, spread, algorithm, and bounded overlay without presenting it as approved.
 
 ## Google Cloud Run
 
 See [DEPLOY.md](DEPLOY.md) and [deploy/gcp/README.md](deploy/gcp/README.md). The repository includes a PowerShell deployment script that builds one image and deploys it as both a Cloud Run service and a Cloud Run Job.
 
-The current public deployment is [mini-grp-web](https://mini-grp-web-l4pzrl64jq-de.a.run.app) in Google Cloud region `asia-east1`. Its initial 60-snapshot research pipeline completed successfully and intentionally left screening on the linear baseline because the trained candidate did not pass the model-approval thresholds.
+The current public deployment is [mini-grp-web](https://mini-grp-web-l4pzrl64jq-de.a.run.app) in Google Cloud region `asia-east1`. Its initial 60-snapshot research pipeline completed successfully. The trained candidate did not pass the model-approval thresholds, so linear remains the production default while the candidate is available through the separate experimental ML mode.
 
 ## Project structure
 

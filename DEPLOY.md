@@ -71,7 +71,7 @@ As of 2026-06-13, the reference deployment is running in project `project-009807
 | Runtime identity | `mini-grp-runtime@project-00980766-847f-47d3-b03.iam.gserviceaccount.com` |
 | Scheduler | `mini-grp-monthly`, 20:00 Asia/Shanghai on the first day of each month |
 | Stored research data | 60 snapshot dates, 90,000 rows, 58 labelled periods |
-| Model state | one Gradient Boosting candidate; no approved model |
+| Model state | one Gradient Boosting candidate, available in Experimental ML mode; no approved model |
 
 The web health endpoint and all four Streamlit tabs have been verified. The stored-snapshot backtest also runs successfully from the deployed web service.
 
@@ -106,7 +106,7 @@ Ensure WSL 2 and Virtual Machine Platform are enabled, restart Windows, then lau
 
 **No approved model**
 
-Approval is intentionally withheld when rank IC or top-bottom spread is non-positive. The current 58-period training set still has a negative candidate spread, so baseline-only operation is the correct state rather than a deployment error.
+Approval is intentionally withheld when rank IC or top-bottom spread is non-positive. The current 58-period training set still has a negative candidate spread, so the linear model remains the production default. The candidate can be run explicitly through `Experimental ML candidate` for research comparison, with its failed validation metrics displayed on screen.
 
 **Cloud Run cannot connect to PostgreSQL**
 

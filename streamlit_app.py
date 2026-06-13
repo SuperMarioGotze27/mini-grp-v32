@@ -30,6 +30,10 @@ DIMENSION_LABELS = {
     "expectation_score": "Expectation",
 }
 
+LINEAR_MODE = "Linear baseline"
+APPROVED_ML_MODE = "Approved ML overlay"
+EXPERIMENTAL_ML_MODE = "Experimental ML candidate"
+
 
 def _style() -> None:
     st.markdown(
@@ -176,27 +180,44 @@ def _screening_tab(
     if run:
         try:
             model = None
-            if scoring_mode == "Approved ML overlay":
+            if scoring_mode in {APPROVED_ML_MODE, EXPERIMENTAL_ML_MODE}:
                 store = ResearchStore(database_url)
-                model = store.latest_model("approved")
+                model_status = "approved" if scoring_mode == APPROVED_ML_MODE else "candidate"
+                model = store.latest_model(model_status)
                 if model is None:
-                    st.error(
-                        "ML overlay is unavailable because no model has passed the approval thresholds. "
-                        "The previous linear result remains unchanged."
-                    )
+                    st.error(f"No {model_status} ML model is available in the model registry.")
                     st.caption("Open Model registry to review the candidate validation metrics.")
                     return
             with st.spinner("Loading and scoring the universe..."):
                 universe = _load_universe(data_mode, market, n_stocks, seed, provider_signature)
                 scored, baseline_top = score_universe(universe, top_n)
                 model_version = "linear-v3.4"
-                if scoring_mode == "Approved ML overlay":
-                    scored = apply_ml_overlay(scored, model_record=model)
+                model_summary = None
+                if model is not None:
+                    scored = apply_ml_overlay(
+                        scored,
+                        model_record=model,
+                        allow_candidate=scoring_mode == EXPERIMENTAL_ML_MODE,
+                    )
                     top_picks = scored.head(top_n).copy()
                     model_version = str(top_picks["model_version"].iloc[0])
+                    selected_name = model.metrics.get("selected_model", "unknown")
+                    validation = model.metrics.get("validation", {}).get(selected_name, {})
+                    model_summary = {
+                        "algorithm": selected_name,
+                        "mean_rank_ic": validation.get("mean_rank_ic"),
+                        "mean_spread": validation.get("mean_top_bottom_spread"),
+                        "overlay_weight": float(model.bundle.get("overlay_weight", 0.15)),
+                    }
                 else:
                     top_picks = baseline_top
-                st.session_state["screening"] = (scored, top_picks, scoring_mode, model_version)
+                st.session_state["screening"] = (
+                    scored,
+                    top_picks,
+                    scoring_mode,
+                    model_version,
+                    model_summary,
+                )
         except DataSourceUnavailable as exc:
             st.error(str(exc))
         except Exception as exc:
@@ -206,7 +227,7 @@ def _screening_tab(
         st.info("Run the model to generate the ranked universe.")
         return
 
-    scored, top_picks, applied_mode, model_version = st.session_state["screening"]
+    scored, top_picks, applied_mode, model_version, model_summary = st.session_state["screening"]
     source = str(scored.get("data_source", pd.Series(["unknown"])).iloc[0])
     coverage = float(scored.get("factor_coverage", pd.Series([1.0])).mean())
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -214,10 +235,28 @@ def _screening_tab(
     c2.metric("Selected", len(top_picks))
     c3.metric("Data source", source)
     c4.metric("Mean factor coverage", f"{coverage:.0%}")
-    c5.metric("Scoring model", "ML overlay" if applied_mode == "Approved ML overlay" else "Linear")
+    model_label = {
+        APPROVED_ML_MODE: "Approved ML",
+        EXPERIMENTAL_ML_MODE: "Experimental ML",
+    }.get(applied_mode, "Linear")
+    c5.metric("Scoring model", model_label)
 
-    if applied_mode == "Approved ML overlay":
+    if applied_mode == APPROVED_ML_MODE:
         st.caption(f"Approved model: {model_version}. ML contribution is capped at 30% of the final score.")
+    elif applied_mode == EXPERIMENTAL_ML_MODE:
+        st.warning(
+            "Experimental ML is active. This candidate failed the production approval thresholds, "
+            "so its ranking is for research comparison rather than investment use."
+        )
+
+    if model_summary is not None:
+        m1, m2, m3, m4 = st.columns(4)
+        rank_ic = model_summary["mean_rank_ic"]
+        spread = model_summary["mean_spread"]
+        m1.metric("ML algorithm", str(model_summary["algorithm"]).replace("_", " ").title())
+        m2.metric("Validation rank IC", "N/A" if rank_ic is None else f"{rank_ic:.4f}")
+        m3.metric("Top-bottom spread", "N/A" if spread is None else f"{spread:.2%}")
+        m4.metric("ML weight", f"{model_summary['overlay_weight']:.0%}")
 
     st.dataframe(top_picks, use_container_width=True, hide_index=True)
     st.download_button(
@@ -340,15 +379,27 @@ def _model_registry_tab(database_url: str | None) -> None:
     c4.metric("Latest snapshot", status["snapshot_end"] or "None")
 
     if model is None:
-        st.warning("No approved model is available. Screening remains on the linear baseline.")
-        if candidate is not None:
-            st.caption(f"Latest candidate {candidate.version} did not pass the approval thresholds.")
+        st.warning("No approved model is available. Production screening remains on the linear baseline.")
+    else:
+        st.success(f"Approved production model: {model.version}")
+
+    displayed_model = model or candidate
+    if displayed_model is None:
+        st.info("No trained model is available yet.")
         return
 
-    metrics = model.metrics
+    if model is None and candidate is not None:
+        st.info(
+            "The latest candidate can now be selected as Experimental ML in the sidebar. "
+            "It remains clearly separated from approved production inference."
+        )
+
+    metrics = displayed_model.metrics
     selected = metrics.get("validation", {}).get(metrics.get("selected_model", ""), {})
-    st.success(
-        f"Approved: {model.version} | {model.trained_from} to {model.trained_through} | "
+    status_label = "Approved" if displayed_model.status == "approved" else "Experimental candidate"
+    st.subheader(status_label)
+    st.caption(
+        f"{displayed_model.version} | {displayed_model.trained_from} to {displayed_model.trained_through} | "
         f"{metrics.get('training_rows', 0):,} training rows"
     )
     m1, m2, m3 = st.columns(3)
@@ -357,6 +408,14 @@ def _model_registry_tab(database_url: str | None) -> None:
     m1.metric("Walk-forward rank IC", "N/A" if mean_ic is None else f"{mean_ic:.3f}")
     m2.metric("Top-bottom forward spread", "N/A" if spread is None else f"{spread:.2%}")
     m3.metric("Selected algorithm", metrics.get("selected_model", "unknown"))
+
+    failed_checks = []
+    if mean_ic is None or mean_ic <= 0:
+        failed_checks.append("rank IC must be positive")
+    if spread is None or spread <= 0:
+        failed_checks.append("top-bottom spread must be positive")
+    if displayed_model.status != "approved" and failed_checks:
+        st.warning("Approval checks not passed: " + "; ".join(failed_checks) + ".")
 
     folds = pd.DataFrame(selected.get("folds", []))
     if not folds.empty:
@@ -368,7 +427,7 @@ def _model_registry_tab(database_url: str | None) -> None:
         st.dataframe(folds, use_container_width=True, hide_index=True)
 
     with st.expander("Model features and factor diagnostics"):
-        st.write(", ".join(model.features))
+        st.write(", ".join(displayed_model.features))
         st.dataframe(pd.DataFrame(metrics.get("factor_metrics", [])), use_container_width=True, hide_index=True)
 
 
@@ -386,7 +445,11 @@ def main() -> None:
     market = st.sidebar.selectbox("Market", ["CN", "US"], disabled=data_mode == "Synthetic demo")
     n_stocks = st.sidebar.slider("Universe size", 50, 500, 200, 50)
     top_n = st.sidebar.slider("Top N", 5, 50, 20, 5)
-    scoring_mode = st.sidebar.selectbox("Scoring model", ["Linear baseline", "Approved ML overlay"])
+    scoring_mode = st.sidebar.selectbox(
+        "Scoring model",
+        [LINEAR_MODE, EXPERIMENTAL_ML_MODE, APPROVED_ML_MODE],
+        help="Experimental ML runs the latest candidate even when it has not passed production approval.",
+    )
     seed = st.sidebar.number_input("Demo seed", min_value=1, max_value=999999, value=42)
 
     provider_signature = _configure_research_api()
@@ -427,6 +490,7 @@ def main() -> None:
             6. Validate Ridge and Gradient Boosting with expanding-window, out-of-sample folds.
             7. Register a model only when rank IC and top-minus-bottom spread are both positive.
             8. Blend an approved ML score into the linear baseline with a hard 30% maximum weight.
+               A separately labelled experimental mode can run the latest candidate for comparison.
             9. Backtest stored snapshots with explicit turnover costs and an equal-weight universe benchmark.
 
             The synthetic mode is for demonstrations and regression tests. Research mode refuses silent fallback to synthetic data.

@@ -1,4 +1,4 @@
-"""Approved-model inference and bounded nonlinear score blending."""
+"""Governed model inference and bounded nonlinear score blending."""
 
 from __future__ import annotations
 
@@ -14,11 +14,16 @@ def apply_ml_overlay(
     scored: pd.DataFrame,
     model_record: Optional[ModelRecord] = None,
     store: Optional[ResearchStore] = None,
+    allow_candidate: bool = False,
 ) -> pd.DataFrame:
-    """Blend an approved ML prediction into the interpretable linear score."""
+    """Blend an approved, or explicitly allowed candidate, ML prediction."""
     record = model_record or (store.latest_model("approved") if store else None)
     if record is None:
         raise RuntimeError("No approved ML model is available in the model registry")
+    if record.status != "approved" and not (allow_candidate and record.status == "candidate"):
+        raise RuntimeError(
+            f"Model {record.version} has status '{record.status}' and is not approved for inference"
+        )
     result = scored.copy()
     features = list(record.bundle["features"])
     for feature in features:
@@ -39,5 +44,8 @@ def apply_ml_overlay(
             .astype(int)
         )
     result["model_version"] = record.version
+    result["model_status"] = record.status
+    result["model_type"] = str(record.bundle.get("model_type", "unknown"))
+    result["ml_overlay_weight"] = weight
     result["model_trained_through"] = record.trained_through
     return result.sort_values("final_score", ascending=False).reset_index(drop=True)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import pytest
 import requests
 
 from core.main import score_universe
@@ -129,6 +131,14 @@ def test_storage_training_inference_and_backtest(tmp_path):
     assert {"linear_score", "ml_score", "final_score", "final_rank"}.issubset(overlaid.columns)
     assert overlaid["final_score"].is_monotonic_decreasing
     assert overlaid["model_version"].nunique() == 1
+    assert set(overlaid["model_status"]) == {"approved"}
+
+    candidate = replace(model, status="candidate")
+    with pytest.raises(RuntimeError, match="not approved"):
+        apply_ml_overlay(scored, model_record=candidate)
+    experimental = apply_ml_overlay(scored, model_record=candidate, allow_candidate=True)
+    assert set(experimental["model_status"]) == {"candidate"}
+    assert set(experimental["model_type"]) == {model.bundle["model_type"]}
 
     results, backtest_metrics = run_snapshot_backtest(store, top_n=20, transaction_cost=0.001)
     assert len(results) == 14
